@@ -1,0 +1,11 @@
+seed: 20260417
+paths:
+  raw_excel: "data/raw/附件1：样例数据.xlsx"
+  sample_preview: "data/raw/sample_preview.tsv"
+  topic_text: "data/raw/c_topic_extracted.txt"
+  tech_route: "docs/整体技术路线框架.md"
+  outputs_dir: "outputs"
+runtime:
+  save_intermediate: true
+  bootstrap_samples: 50
+  plots: true

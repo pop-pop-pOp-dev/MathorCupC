@@ -1,0 +1,77 @@
+row_count_expected: 1000
+column_count_expected: 37
+column_mapping:
+  样本ID: sample_id
+  体质标签: constitution_label
+  平和质: constitution_pinghe
+  气虚质: constitution_qixu
+  阳虚质: constitution_yangxu
+  阴虚质: constitution_yinxu
+  痰湿质: constitution_tanshi
+  湿热质: constitution_shire
+  血瘀质: constitution_xueyu
+  气郁质: constitution_qiyu
+  特禀质: constitution_tebing
+  ADL用厕: adl_toilet
+  ADL吃饭: adl_eating
+  ADL步行: adl_walking
+  ADL穿衣: adl_dressing
+  ADL洗澡: adl_bathing
+  ADL总分: adl_total
+  IADL购物: iadl_shopping
+  IADL做饭: iadl_cooking
+  IADL理财: iadl_finance
+  IADL交通: iadl_transport
+  IADL服药: iadl_medication
+  IADL总分: iadl_total
+  活动量表总分（ADL总分+IADL总分）: activity_total
+  HDL-C（高密度脂蛋白）: hdl_c
+  LDL-C（低密度脂蛋白）: ldl_c
+  TG（甘油三酯）: tg
+  TC（总胆固醇）: tc
+  空腹血糖: fasting_glucose
+  血尿酸: uric_acid
+  BMI: bmi
+  高血脂症二分类标签: hyperlipidemia_label
+  血脂异常分型标签（确诊病例）: lipid_abnormality_type
+  年龄组: age_group
+  性别: sex
+  吸烟史: smoking_history
+  饮酒史: drinking_history
+groups:
+  constitution_scores:
+    - constitution_pinghe
+    - constitution_qixu
+    - constitution_yangxu
+    - constitution_yinxu
+    - constitution_tanshi
+    - constitution_shire
+    - constitution_xueyu
+    - constitution_qiyu
+    - constitution_tebing
+  adl_items:
+    - adl_toilet
+    - adl_eating
+    - adl_walking
+    - adl_dressing
+    - adl_bathing
+  iadl_items:
+    - iadl_shopping
+    - iadl_cooking
+    - iadl_finance
+    - iadl_transport
+    - iadl_medication
+  lipid_core:
+    - hdl_c
+    - ldl_c
+    - tg
+    - tc
+  metabolic_related:
+    - fasting_glucose
+    - uric_acid
+    - bmi
+  background:
+    - age_group
+    - sex
+    - smoking_history
+    - drinking_history

@@ -1,0 +1,34 @@
+latent_state:
+  view_weights:
+    constitution: 0.35
+    activity: 0.25
+    metabolic: 0.40
+  bootstrap_samples: 50
+  stability_top_quantile: 0.20
+  report_ci_level: 0.95
+risk_score:
+  weights:
+    latent_state: 0.30
+    lipid_deviation_total: 0.35
+    metabolic_deviation_total: 0.15
+    activity_risk: 0.10
+    constitution_tanshi: 0.05
+    background_risk: 0.05
+  interaction_weights:
+    tanshi_x_low_activity: 0.08
+    tanshi_x_bmi_deviation: 0.06
+    metabolic_x_low_activity: 0.05
+anchors:
+  low_latent_quantile: 0.35
+  high_latent_quantile: 0.65
+  low_activity_cutoff: 40
+  adequate_activity_cutoff: 60
+thresholds:
+  search_grid_points: 60
+  bootstrap_samples: 50
+rules:
+  max_rule_size: 3
+  min_coverage: 0.20
+  min_purity: 0.60
+  bootstrap_samples: 50
+  selection_frequency_threshold: 0.60

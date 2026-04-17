@@ -1,0 +1,32 @@
+stages:
+  - name: activation
+    months: 2
+  - name: consolidation
+    months: 2
+  - name: maintenance
+    months: 2
+frequency_candidates: [1, 3, 5, 7, 10]
+beam_width: 64
+scenarios:
+  optimistic: 1.15
+  nominal: 1.00
+  conservative: 0.80
+objective_weights:
+  final_latent_state: 0.35
+  final_tanshi_score: 0.35
+  total_cost: 0.10
+  total_burden: 0.10
+  smoothness: 0.10
+burden:
+  intensity_weight: 1.0
+  frequency_weight: 0.4
+  change_intensity_weight: 0.8
+  change_frequency_weight: 0.15
+synergy:
+  enabled: true
+  coefficient: 0.015
+  diminishing_scale: 0.12
+tolerance:
+  activity_weight: 0.15
+  age_weight: 3.0
+  base_capacity: 4.0
