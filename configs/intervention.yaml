@@ -8,6 +8,9 @@ stages:
 # true：使用 clinical_rules.exercise.frequency_range 全枚举 1–10 次/周
 frequency_from_clinical_rules: true
 frequency_candidates: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+budget_levels: [500, 800, 1200, 1500, 2000]
+pareto_primary_budget: 2000
+max_intensity_jump: 1
 metabolic_gain_multiplier:
   bmi_per_unit: 0.02
 scenarios:

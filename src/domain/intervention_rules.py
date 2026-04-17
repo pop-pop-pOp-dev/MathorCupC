@@ -160,20 +160,21 @@ def stage_effect(
     exercise = clinical_rules['exercise']
     tcm = clinical_rules['tcm']
     response_cfg = {**DEFAULT_TRANSITION_CALIBRATION, **(response_config or {})}
-    duration_map = exercise.get('duration_minutes', {1: 10, 2: 20, 3: 30})
-    duration_minutes = float(duration_map[intensity])
-    reference_weekly_minutes = max(float(response_cfg['reference_weekly_minutes']), 1.0)
     stable_frequency = max(float(exercise.get('stable_if_below_frequency', 5)), 1.0)
-    weekly_minutes = duration_minutes * float(frequency)
-    dose_ratio = weekly_minutes / reference_weekly_minutes
-    stability_ratio = min(1.0, float(frequency) / stable_frequency)
-    exercise_response = float(months) * dose_ratio * stability_ratio
+    intensity_gain_per_level = float(exercise.get('monthly_intensity_gain_per_level', 0.03))
+    frequency_gain_per_extra_session = float(exercise.get('monthly_frequency_gain_per_extra_session', 0.01))
+    intensity_levels_above_baseline = max(0, int(intensity) - 1)
+    frequency_gate = min(1.0, float(frequency) / stable_frequency)
+    frequency_extras = max(0.0, float(frequency) - stable_frequency)
+    intensity_response = float(months) * intensity_levels_above_baseline * intensity_gain_per_level * frequency_gate
+    frequency_response = float(months) * frequency_extras * frequency_gain_per_extra_session
+    exercise_response = intensity_response + frequency_response
     synergy = 0.0
     if synergy_config.get('enabled', False):
         synergy = (
             float(synergy_config['coefficient'])
             * max(0, tcm_level - 1)
-            * dose_ratio
+            * max(exercise_response, 0.0)
             * math.exp(-float(synergy_config['diminishing_scale']) * max(0, frequency - stable_frequency))
         )
     tcm_absolute = float(months) * float(tcm['monthly_absolute_gain'][tcm_level])

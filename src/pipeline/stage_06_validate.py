@@ -21,6 +21,10 @@ def run_stage_06_validate(df: pd.DataFrame, plans: pd.DataFrame, run_dir: Path) 
     strategy_map = _read_json(run_dir / 'optimization' / 'strategy_mapping_summary.json')
     if strategy_map:
         diagnostics['strategy_mapping'] = strategy_map
+    pareto_frontier_path = run_dir / 'optimization' / 'pareto_frontier_summary.csv'
+    if pareto_frontier_path.exists():
+        pareto_frontier = pd.read_csv(pareto_frontier_path)
+        diagnostics['pareto_frontier'] = pareto_frontier.to_dict(orient='records')
     robustness = summarize_optimization_robustness(plans)
     latent_summary = _read_json(run_dir / 'latent' / 'latent_stability_summary.json')
     risk_summary = _read_json(run_dir / 'risk' / 'risk_threshold_summary.json')

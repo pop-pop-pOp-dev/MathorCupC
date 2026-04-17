@@ -56,16 +56,25 @@ def _build_stage_action_map(actions: list[dict[str, Any]]) -> dict[int, list[int
     return mapping
 
 
-def _build_pair_data(actions: list[dict[str, Any]], stage_actions: dict[int, list[int]]) -> list[dict[str, Any]]:
+def _build_pair_data(
+    actions: list[dict[str, Any]],
+    stage_actions: dict[int, list[int]],
+    max_intensity_jump: int = 1,
+) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
     pairs: list[dict[str, Any]] = []
+    forbidden_pairs: list[tuple[int, int]] = []
     for stage_idx in sorted(stage_actions)[:-1]:
         current_actions = stage_actions.get(stage_idx, [])
         next_actions = stage_actions.get(stage_idx + 1, [])
         for i in current_actions:
             for j in next_actions:
-                penalty = abs(int(actions[i]['intensity']) - int(actions[j]['intensity'])) + 0.2 * abs(int(actions[i]['frequency']) - int(actions[j]['frequency']))
+                intensity_jump = abs(int(actions[i]['intensity']) - int(actions[j]['intensity']))
+                if intensity_jump > max_intensity_jump:
+                    forbidden_pairs.append((i, j))
+                    continue
+                penalty = intensity_jump + 0.2 * abs(int(actions[i]['frequency']) - int(actions[j]['frequency']))
                 pairs.append({'from_idx': i, 'to_idx': j, 'penalty': float(penalty)})
-    return pairs
+    return pairs, forbidden_pairs
 
 
 def _build_transition_tables(
@@ -111,19 +120,25 @@ def optimize_patient_plan(
     clinical_rules: dict,
     intervention_config: dict,
     calibration: dict[str, Any] | None = None,
+    budget_override: float | None = None,
+    optimize_for: str = 'weighted',
 ) -> dict:
     actions = _build_action_space(row, clinical_rules, intervention_config)
     if not actions:
         return {'sample_id': int(row['sample_id']), 'status': 'infeasible', 'solver_status': 'no_actions'}
 
     stage_actions = _build_stage_action_map(actions)
-    pair_data = _build_pair_data(actions, stage_actions)
+    pair_data, forbidden_pairs = _build_pair_data(
+        actions,
+        stage_actions,
+        max_intensity_jump=int(intervention_config.get('max_intensity_jump', 1)),
+    )
     response_profile = build_patient_response_profile(row, calibration)
     tolerance_limit = float(tolerance_capacity(row['activity_total'], int(row['age_group']), intervention_config['tolerance']))
     transition_tables = _build_transition_tables(row, actions, clinical_rules, intervention_config, calibration)
     scenarios = list(transition_tables.keys())
     objective_weights = intervention_config['objective_weights']
-    max_budget = float(clinical_rules['budget']['six_month_total_max'])
+    max_budget = float(budget_override if budget_override is not None else clinical_rules['budget']['six_month_total_max'])
     n_actions = len(actions)
     n_pairs = len(pair_data)
     eta_idx = n_actions + n_pairs
@@ -152,6 +167,12 @@ def optimize_patient_plan(
     total_burden_row = np.zeros(n_vars, dtype=float)
     total_burden_row[:n_actions] = burden_coeffs
     constraints.append(LinearConstraint(total_burden_row, -np.inf, max_total_burden))
+
+    for from_idx, to_idx in forbidden_pairs:
+        forbidden_row = np.zeros(n_vars, dtype=float)
+        forbidden_row[int(from_idx)] = 1.0
+        forbidden_row[int(to_idx)] = 1.0
+        constraints.append(LinearConstraint(forbidden_row, -np.inf, 1.0))
 
     for pair_idx, pair in enumerate(pair_data):
         y_idx = n_actions + pair_idx
@@ -186,19 +207,23 @@ def optimize_patient_plan(
         constraints.append(LinearConstraint(tanshi_nonneg, -np.inf, tanshi_start))
 
         scenario_row = np.zeros(n_vars, dtype=float)
-        scenario_row[:n_actions] = (
-            float(objective_weights['total_cost']) * cost_coeffs / max(max_budget, 1.0)
-            + float(objective_weights['total_burden']) * burden_coeffs / max_total_burden
-            - float(objective_weights['final_latent_state']) * latent_gains
-            - float(objective_weights['final_tanshi_score']) * tanshi_gains
-        )
-        if n_pairs:
-            scenario_row[n_actions:eta_idx] = float(objective_weights['smoothness']) * pair_penalties / 10.0
+        if optimize_for == 'pareto_tanshi':
+            scenario_row[:n_actions] = -tanshi_gains
+            scenario_constant = -tanshi_start
+        else:
+            scenario_row[:n_actions] = (
+                float(objective_weights['total_cost']) * cost_coeffs / max(max_budget, 1.0)
+                + float(objective_weights['total_burden']) * burden_coeffs / max_total_burden
+                - float(objective_weights['final_latent_state']) * latent_gains
+                - float(objective_weights['final_tanshi_score']) * tanshi_gains
+            )
+            if n_pairs:
+                scenario_row[n_actions:eta_idx] = float(objective_weights['smoothness']) * pair_penalties / 10.0
+            scenario_constant = -(
+                float(objective_weights['final_latent_state']) * latent_start
+                + float(objective_weights['final_tanshi_score']) * tanshi_start
+            )
         scenario_row[eta_idx] = -1.0
-        scenario_constant = -(
-            float(objective_weights['final_latent_state']) * latent_start
-            + float(objective_weights['final_tanshi_score']) * tanshi_start
-        )
         constraints.append(LinearConstraint(scenario_row, -np.inf, scenario_constant))
 
     c = np.zeros(n_vars, dtype=float)
@@ -243,6 +268,8 @@ def optimize_patient_plan(
         'status': 'ok',
         'solver_status': solver_status,
         'robust_type': 'scenario_minmax_milp',
+        'budget_cap': max_budget,
+        'objective_mode': optimize_for,
         'final_latent_state': float(max(0.0, latent_start - nominal_latent_gain)),
         'final_tanshi_score': float(max(0.0, tanshi_start - nominal_tanshi_gain)),
         'total_cost': total_cost,
@@ -257,8 +284,22 @@ def optimize_patient_plan(
     }
 
 
-def _optimize_patient_plan_row(row_dict: dict[str, Any], clinical_rules: dict, intervention_config: dict, calibration: dict[str, Any] | None) -> dict:
-    return optimize_patient_plan(pd.Series(row_dict), clinical_rules, intervention_config, calibration=calibration)
+def _optimize_patient_plan_row(
+    row_dict: dict[str, Any],
+    clinical_rules: dict,
+    intervention_config: dict,
+    calibration: dict[str, Any] | None,
+    budget_override: float | None,
+    optimize_for: str,
+) -> dict:
+    return optimize_patient_plan(
+        pd.Series(row_dict),
+        clinical_rules,
+        intervention_config,
+        calibration=calibration,
+        budget_override=budget_override,
+        optimize_for=optimize_for,
+    )
 
 
 def optimize_population(
@@ -266,15 +307,28 @@ def optimize_population(
     clinical_rules: dict,
     intervention_config: dict,
     n_jobs: int | None = None,
+    budget_override: float | None = None,
+    optimize_for: str = 'weighted',
 ) -> pd.DataFrame:
     calibration = fit_transition_calibration(df, intervention_config)
     nj = int(effective_n_jobs(-1 if n_jobs is None else int(n_jobs)))
     row_dicts = [row.to_dict() for _, row in df.iterrows()]
     if nj == 1 or len(row_dicts) <= 1:
-        rows = [_optimize_patient_plan_row(d, clinical_rules, intervention_config, calibration) for d in row_dicts]
+        rows = [
+            _optimize_patient_plan_row(d, clinical_rules, intervention_config, calibration, budget_override, optimize_for)
+            for d in row_dicts
+        ]
     else:
         rows = Parallel(n_jobs=nj)(
-            delayed(_optimize_patient_plan_row)(d, clinical_rules, intervention_config, calibration) for d in row_dicts
+            delayed(_optimize_patient_plan_row)(
+                d,
+                clinical_rules,
+                intervention_config,
+                calibration,
+                budget_override,
+                optimize_for,
+            )
+            for d in row_dicts
         )
     out = pd.DataFrame(rows)
     if 'plan' in out.columns:

@@ -13,29 +13,35 @@ latent_state:
 
 # 风险：连续临床严重度目标 + Ridge（不把二分类确诊标签作为主监督，避免复写诊断）
 risk_score:
-  model_type: severity_ridge
+  model_type: anchor_front_logistic
   calibration_bins: 10
   features:
     base:
-      - latent_state_h
-      - lipid_deviation_total
+      - constitution_factor
+      - activity_factor
       - metabolic_deviation_total
+      - activity_total
       - activity_risk
       - constitution_tanshi
+      - dev_bmi
+      - dev_fasting_glucose
+      - dev_uric_acid
+      - age_group
       - background_risk
     interactions:
       tanshi_x_low_activity: [constitution_tanshi, low_activity_flag]
       tanshi_x_bmi_deviation: [constitution_tanshi, dev_bmi]
       metabolic_x_low_activity: [metabolic_deviation_total, low_activity_flag]
-      latent_x_activity_risk: [latent_state_h, activity_risk]
+      age_x_activity_risk: [age_group, activity_risk]
   severity_model:
     target_weights:
-      lipid_deviation_total: 0.45
-      metabolic_deviation_total: 0.35
-      activity_risk: 0.20
+      metabolic_deviation_total: 0.40
+      constitution_tanshi: 0.30
+      activity_risk: 0.30
     exclude_from_x:
+      - hyperlipidemia_label
       - lipid_deviation_total
-      - metabolic_deviation_total
+      - latent_state_h
     alphas: [0.01, 0.05, 0.1, 0.5, 1.0, 3.0, 10.0, 30.0, 100.0]
     cv_folds: 5
 
@@ -71,10 +77,11 @@ thresholds:
   bootstrap_samples: 50
   min_group_share: 0.12
   severity_features:
-    lipid_deviation_total: 0.35
-    metabolic_deviation_total: 0.25
-    latent_state_h: 0.25
+    constitution_factor: 0.25
+    activity_factor: 0.25
+    metabolic_deviation_total: 0.20
     constitution_tanshi: 0.15
+    activity_risk: 0.15
 
 rules:
   max_rule_size: 3

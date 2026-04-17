@@ -11,20 +11,40 @@ from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 DEFAULT_BASE_FEATURES = [
-    'latent_state_h',
-    'lipid_deviation_total',
+    'constitution_factor',
+    'activity_factor',
     'metabolic_deviation_total',
+    'activity_total',
     'activity_risk',
     'constitution_tanshi',
+    'dev_bmi',
+    'dev_fasting_glucose',
+    'dev_uric_acid',
+    'age_group',
     'background_risk',
 ]
 DEFAULT_INTERACTIONS = {
     'tanshi_x_low_activity': ['constitution_tanshi', 'low_activity_flag'],
     'tanshi_x_bmi_deviation': ['constitution_tanshi', 'dev_bmi'],
     'metabolic_x_low_activity': ['metabolic_deviation_total', 'low_activity_flag'],
-    'latent_x_activity_risk': ['latent_state_h', 'activity_risk'],
+    'age_x_activity_risk': ['age_group', 'activity_risk'],
 }
 DEFAULT_CANDIDATE_CS = [0.01, 0.05, 0.1, 0.5, 1.0, 3.0, 10.0]
+FORBIDDEN_DIAGNOSTIC_FEATURES = {
+    'tc',
+    'tg',
+    'ldl_c',
+    'hdl_c',
+    'dev_tc',
+    'dev_tg',
+    'dev_ldl_c',
+    'dev_hdl_c',
+    'lipid_deviation_total',
+    'hyperlipidemia_label',
+    'hyperlipidemia_type_label',
+    'latent_state_h',
+    'metabolic_factor',
+}
 
 PenaltyType = Literal['l1', 'l2']
 SolverType = Literal['liblinear', 'lbfgs']
@@ -55,6 +75,46 @@ def _resolve_risk_section(risk_config: dict) -> dict:
 
 def _resolve_threshold_section(risk_config: dict) -> dict:
     return risk_config.get('thresholds', {})
+
+
+def _drop_forbidden_diagnostic_features(x: pd.DataFrame) -> pd.DataFrame:
+    keep_cols = [
+        col for col in x.columns
+        if col not in FORBIDDEN_DIAGNOSTIC_FEATURES and not col.startswith(('score_tc', 'score_tg', 'score_ldl', 'score_hdl'))
+    ]
+    return x.loc[:, keep_cols].copy()
+
+
+def build_diagnosis_anchor_flags(df: pd.DataFrame) -> pd.DataFrame:
+    if 'hyperlipidemia_label' in df.columns:
+        high_anchor = pd.to_numeric(df['hyperlipidemia_label'], errors='coerce').fillna(0).astype(int) == 1
+    elif 'lipid_deviation_total' in df.columns:
+        high_anchor = pd.to_numeric(df['lipid_deviation_total'], errors='coerce').fillna(0.0) > 0.0
+    else:
+        lipid_parts = [
+            pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            for col in ['dev_tc', 'dev_tg', 'dev_ldl_c', 'dev_hdl_c']
+            if col in df.columns
+        ]
+        high_anchor = pd.concat(lipid_parts, axis=1).sum(axis=1) > 0.0 if lipid_parts else pd.Series(False, index=df.index)
+    if 'lipid_deviation_total' in df.columns:
+        low_anchor = pd.to_numeric(df['lipid_deviation_total'], errors='coerce').fillna(0.0) <= 1e-9
+    else:
+        lipid_parts = [
+            pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            for col in ['dev_tc', 'dev_tg', 'dev_ldl_c', 'dev_hdl_c']
+            if col in df.columns
+        ]
+        low_anchor = pd.concat(lipid_parts, axis=1).sum(axis=1) <= 1e-9 if lipid_parts else pd.Series(False, index=df.index)
+    if 'hyperlipidemia_label' in df.columns:
+        low_anchor &= pd.to_numeric(df['hyperlipidemia_label'], errors='coerce').fillna(0).astype(int) == 0
+    return pd.DataFrame(
+        {
+            'low_anchor': low_anchor.astype(int),
+            'high_anchor': high_anchor.astype(int),
+        },
+        index=df.index,
+    )
 
 
 def _build_legacy_risk_score(df: pd.DataFrame, risk_config: dict) -> pd.DataFrame:
@@ -117,8 +177,8 @@ def fit_severity_ridge_model(df: pd.DataFrame, risk_config: dict, seed: int = 20
     risk_section = _resolve_risk_section(risk_config)
     sm = risk_section.get('severity_model', {}) if isinstance(risk_section.get('severity_model'), dict) else {}
     y = build_severity_target(df, risk_config)
-    x = build_risk_feature_matrix(df, risk_config)
-    exclude = list(sm.get('exclude_from_x', ['lipid_deviation_total', 'metabolic_deviation_total']))
+    x = _drop_forbidden_diagnostic_features(build_risk_feature_matrix(df, risk_config))
+    exclude = list(sm.get('exclude_from_x', ['metabolic_deviation_total']))
     for col in exclude:
         if col in x.columns:
             x = x.drop(columns=[col])
@@ -215,6 +275,78 @@ def fit_severity_ridge_model(df: pd.DataFrame, risk_config: dict, seed: int = 20
     )
 
 
+def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) -> RiskModelArtifacts:
+    risk_section = _resolve_risk_section(risk_config)
+    x = _drop_forbidden_diagnostic_features(build_risk_feature_matrix(df, risk_config))
+    anchors = build_diagnosis_anchor_flags(df)
+    train_mask = (anchors['low_anchor'] == 1) | (anchors['high_anchor'] == 1)
+    y = (anchors.loc[train_mask, 'high_anchor'] == 1).astype(int)
+    x_train_full = x.loc[train_mask].copy()
+    if x_train_full.empty or y.nunique() < 2 or y.value_counts().min() < 2:
+        return fit_severity_ridge_model(df, risk_config, seed=seed)
+
+    penalty, solver = _resolve_penalty_and_solver(risk_section.get('penalty', 'l2'))
+    candidate_cs = [float(v) for v in risk_section.get('candidate_cs', DEFAULT_CANDIDATE_CS)]
+    max_iter = int(risk_section.get('max_iter', 5000))
+    cv_folds = int(min(max(2, risk_section.get('cv_folds', 5)), y.value_counts().min()))
+    class_weight = _coerce_class_weight(risk_section.get('class_weight', 'balanced'))
+    scoring = str(risk_section.get('scoring', 'roc_auc'))
+    calibration_bins = int(risk_section.get('calibration_bins', 10))
+
+    best_c = _select_best_c(x_train_full, y, penalty, solver, class_weight, candidate_cs, max_iter, cv_folds, seed, scoring)
+    scaler = StandardScaler().fit(x_train_full)
+    x_train_scaled = scaler.transform(x_train_full)
+    x_all_scaled = scaler.transform(x)
+    model = _make_logistic_model(penalty, solver, best_c, class_weight, max_iter, seed)
+    model.fit(x_train_scaled, y)
+
+    cv_pred = _build_cv_predictions(x_train_full, y, penalty, solver, class_weight, best_c, max_iter, cv_folds, seed)
+    cv_metrics = _build_cv_metrics(y, cv_pred)
+    calibration = _build_calibration_table(y, cv_pred, bins=calibration_bins)
+
+    standardized = pd.DataFrame(x_all_scaled, columns=x.columns, index=df.index)
+    coef = pd.Series(model.coef_[0], index=x.columns)
+    score_frame = standardized.mul(coef, axis=1).rename(columns=lambda col: f'score_{col}')
+    risk_logit = float(model.intercept_[0]) + score_frame.sum(axis=1)
+    risk_prob = _sigmoid(risk_logit).set_axis(df.index)
+    score_frame['risk_logit'] = risk_logit
+    score_frame['risk_prob'] = risk_prob
+    score_frame['continuous_risk_score'] = risk_prob * 100
+
+    abs_weights = coef.abs()
+    weight_sum = float(abs_weights.sum()) + 1e-12
+    coefficients = pd.DataFrame(
+        {
+            'feature': list(coef.index),
+            'coefficient': coef.to_numpy(dtype=float),
+            'odds_ratio': np.exp(coef.to_numpy(dtype=float)),
+            'abs_standardized_weight': abs_weights.to_numpy(dtype=float) / weight_sum,
+            'direction': np.where(coef.to_numpy(dtype=float) >= 0.0, 'risk_up', 'risk_down'),
+            'feature_mean': np.asarray(scaler.mean_, dtype=float),
+            'feature_scale': np.asarray(scaler.scale_, dtype=float),
+        }
+    ).sort_values('abs_standardized_weight', ascending=False).reset_index(drop=True)
+
+    metadata = {
+        'model_type': 'anchor_front_logistic',
+        'penalty': penalty,
+        'best_c': best_c,
+        'cv_folds': cv_folds,
+        'class_weight': class_weight,
+        'n_features': int(x.shape[1]),
+        'train_anchor_count': int(train_mask.sum()),
+        'high_anchor_count': int(anchors['high_anchor'].sum()),
+        'low_anchor_count': int(anchors['low_anchor'].sum()),
+    }
+    return RiskModelArtifacts(
+        score_frame=score_frame,
+        coefficients=coefficients,
+        cv_metrics=cv_metrics,
+        calibration=calibration,
+        metadata=metadata,
+    )
+
+
 def _coerce_interaction_spec(interactions: Any) -> dict[str, list[str]]:
     if isinstance(interactions, dict):
         return {str(name): [str(x) for x in terms] for name, terms in interactions.items()}
@@ -234,6 +366,26 @@ def _resolve_penalty_and_solver(value: Any) -> tuple[PenaltyType, SolverType]:
     return 'l1', 'liblinear'
 
 
+def _make_logistic_model(
+    penalty: PenaltyType,
+    solver: SolverType,
+    c_value: float,
+    class_weight: ClassWeightType,
+    max_iter: int,
+    seed: int,
+) -> LogisticRegression:
+    kwargs: dict[str, Any] = {
+        'C': c_value,
+        'solver': solver,
+        'class_weight': class_weight,
+        'max_iter': max_iter,
+        'random_state': seed,
+    }
+    if penalty != 'l2':
+        kwargs['penalty'] = penalty
+    return LogisticRegression(**kwargs)
+
+
 def _coerce_class_weight(value: Any) -> ClassWeightType:
     if value is None:
         return None
@@ -251,9 +403,11 @@ def build_risk_feature_matrix(df: pd.DataFrame, risk_config: dict) -> pd.DataFra
     interaction_spec = _coerce_interaction_spec(feature_cfg.get('interactions', DEFAULT_INTERACTIONS))
     out = pd.DataFrame(index=df.index)
     for feature in base_features:
-        if feature in df.columns:
+        if feature in df.columns and feature not in FORBIDDEN_DIAGNOSTIC_FEATURES:
             out[str(feature)] = pd.to_numeric(df[feature], errors='coerce').fillna(0.0)
     for name, terms in interaction_spec.items():
+        if name in FORBIDDEN_DIAGNOSTIC_FEATURES or any(term in FORBIDDEN_DIAGNOSTIC_FEATURES for term in terms):
+            continue
         if name in df.columns:
             out[name] = pd.to_numeric(df[name], errors='coerce').fillna(0.0)
             continue
@@ -280,14 +434,7 @@ def _build_cv_predictions(
         scaler = StandardScaler().fit(x.iloc[train_idx])
         x_train = scaler.transform(x.iloc[train_idx])
         x_test = scaler.transform(x.iloc[test_idx])
-        model = LogisticRegression(
-            penalty=penalty,
-            C=best_c,
-            solver=solver,
-            class_weight=class_weight,
-            max_iter=max_iter,
-            random_state=seed,
-        )
+        model = _make_logistic_model(penalty, solver, best_c, class_weight, max_iter, seed)
         model.fit(x_train, y.iloc[train_idx])
         preds[test_idx] = model.predict_proba(x_test)[:, 1]
     return preds
@@ -341,14 +488,7 @@ def _select_best_c(
             scaler = StandardScaler().fit(x.iloc[train_idx])
             x_train = scaler.transform(x.iloc[train_idx])
             x_test = scaler.transform(x.iloc[test_idx])
-            model = LogisticRegression(
-                penalty=penalty,
-                C=float(candidate_c),
-                solver=solver,
-                class_weight=class_weight,
-                max_iter=max_iter,
-                random_state=seed,
-            )
+            model = _make_logistic_model(penalty, solver, float(candidate_c), class_weight, max_iter, seed)
             model.fit(x_train, y.iloc[train_idx])
             y_prob = model.predict_proba(x_test)[:, 1]
             if scoring == 'roc_auc':
@@ -366,7 +506,7 @@ def _select_best_c(
 
 def fit_risk_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) -> RiskModelArtifacts:
     risk_section = _resolve_risk_section(risk_config)
-    model_type = str(risk_section.get('model_type', 'severity_ridge')).lower()
+    model_type = str(risk_section.get('model_type', 'anchor_front_logistic')).lower()
 
     if model_type in {'legacy', 'legacy_weighted'}:
         legacy_score = _build_legacy_risk_score(df, {'risk_score': risk_section} if 'weights' in risk_section else risk_config)
@@ -378,13 +518,16 @@ def fit_risk_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) ->
             metadata={'model_type': 'legacy_weighted'},
         )
 
+    if model_type in {'anchor_front_logistic', 'front_anchor_logit', 'prediagnostic_anchor_logit'}:
+        return fit_anchor_front_model(df, risk_config, seed=seed)
+
     if model_type in {'severity_ridge', 'ridge_severity', 'continuous_ridge'}:
         return fit_severity_ridge_model(df, risk_config, seed=seed)
 
     if 'hyperlipidemia_label' not in df.columns:
         return fit_severity_ridge_model(df, risk_config, seed=seed)
 
-    x = build_risk_feature_matrix(df, risk_config)
+    x = _drop_forbidden_diagnostic_features(build_risk_feature_matrix(df, risk_config))
     y = pd.to_numeric(df['hyperlipidemia_label'], errors='coerce').fillna(0).astype(int)
     if x.empty or y.nunique() < 2 or y.value_counts().min() < 2:
         return fit_severity_ridge_model(df, risk_config, seed=seed)
@@ -401,14 +544,7 @@ def fit_risk_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) ->
     scaler = StandardScaler().fit(x)
     x_scaled = scaler.transform(x)
 
-    final_model = LogisticRegression(
-        penalty=penalty,
-        C=best_c,
-        solver=solver,
-        class_weight=class_weight,
-        max_iter=max_iter,
-        random_state=seed,
-    )
+    final_model = _make_logistic_model(penalty, solver, best_c, class_weight, max_iter, seed)
     final_model.fit(x_scaled, y)
 
     cv_pred = _build_cv_predictions(x, y, penalty, solver, class_weight, best_c, max_iter, cv_folds, seed)
@@ -471,10 +607,11 @@ def build_reference_severity(df: pd.DataFrame, risk_config: dict) -> pd.Series:
         weights = {str(k): float(v) for k, v in severity_cfg.items()}
     else:
         weights = {
-            'lipid_deviation_total': 0.40,
-            'metabolic_deviation_total': 0.25,
-            'latent_state_h': 0.20,
+            'constitution_factor': 0.25,
+            'activity_factor': 0.25,
+            'metabolic_deviation_total': 0.20,
             'constitution_tanshi': 0.15,
+            'activity_risk': 0.15,
         }
     available = [(name, weight) for name, weight in weights.items() if name in df.columns]
     if not available:
@@ -490,42 +627,9 @@ def build_reference_severity(df: pd.DataFrame, risk_config: dict) -> pd.Series:
 
 
 def build_anchor_flags(df: pd.DataFrame, risk_config: dict) -> pd.DataFrame:
-    """锚定子群：用分位与 OR/命中数构造，避免与二分类标签强绑定导致样本为空。"""
-    anchors = risk_config.get('anchors', {})
-    idx = df.index
-    low_hits = pd.Series(0, index=idx, dtype=int)
-    high_hits = pd.Series(0, index=idx, dtype=int)
-
-    if 'lipid_deviation_total' in df.columns:
-        low_lipid = df['lipid_deviation_total'] <= df['lipid_deviation_total'].quantile(float(anchors.get('low_lipid_quantile', 0.30)))
-        high_lipid = df['lipid_deviation_total'] >= df['lipid_deviation_total'].quantile(float(anchors.get('high_lipid_quantile', 0.75)))
-        low_hits += low_lipid.astype(int)
-        high_hits += high_lipid.astype(int)
-    if 'metabolic_deviation_total' in df.columns:
-        low_meta = df['metabolic_deviation_total'] <= df['metabolic_deviation_total'].quantile(float(anchors.get('low_metabolic_quantile', 0.35)))
-        high_meta = df['metabolic_deviation_total'] >= df['metabolic_deviation_total'].quantile(float(anchors.get('high_metabolic_quantile', 0.70)))
-        low_hits += low_meta.astype(int)
-        high_hits += high_meta.astype(int)
-    if 'activity_total' in df.columns:
-        low_act = df['activity_total'] >= float(anchors.get('adequate_activity_cutoff', 60))
-        high_act = df['activity_total'] <= float(anchors.get('low_activity_cutoff', 40))
-        low_hits += low_act.astype(int)
-        high_hits += high_act.astype(int)
-    if 'latent_state_h' in df.columns:
-        low_lat = df['latent_state_h'] <= df['latent_state_h'].quantile(float(anchors.get('low_latent_quantile', 0.40)))
-        high_lat = df['latent_state_h'] >= df['latent_state_h'].quantile(float(anchors.get('high_latent_quantile', 0.65)))
-        low_hits += low_lat.astype(int)
-        high_hits += high_lat.astype(int)
-    if 'constitution_tanshi' in df.columns:
-        high_tan = df['constitution_tanshi'] >= float(anchors.get('high_tanshi_absolute', 60))
-        high_hits += high_tan.astype(int)
-
-    low_need = int(anchors.get('low_profile_min_hits', 3))
-    high_need = int(anchors.get('high_profile_min_hits', 2))
-    low_anchor = (low_hits >= low_need).astype(int)
-    high_anchor = (high_hits >= high_need).astype(int)
-
-    if bool(anchors.get('high_anchor_phlegm_only', False)) and 'phlegm_dampness_label_flag' in df.columns:
-        high_anchor = (high_anchor & (df['phlegm_dampness_label_flag'] == 1)).astype(int)
-
-    return pd.DataFrame({'low_anchor': low_anchor, 'high_anchor': high_anchor})
+    """题意对齐：血脂（或诊断）仅用于定义锚点，前置特征仅用于建模。"""
+    anchors = build_diagnosis_anchor_flags(df)
+    risk_anchor_cfg = risk_config.get('anchors', {})
+    if bool(risk_anchor_cfg.get('high_anchor_phlegm_only', False)) and 'phlegm_dampness_label_flag' in df.columns:
+        anchors['high_anchor'] = ((anchors['high_anchor'] == 1) & (df['phlegm_dampness_label_flag'] == 1)).astype(int)
+    return anchors
