@@ -49,5 +49,10 @@ tcm:
     1: 1.5
     2: 3.0
     3: 4.5
+  # 附表2：按痰湿积分选用调理分级（优化中仅允许题面合理档位）
+  tcm_allowed_levels_by_tanshi:
+    - { max_tanshi: 58.0, levels: [1] }
+    - { max_tanshi: 61.0, levels: [1, 2] }
+    - { max_tanshi: 100.0, levels: [1, 2, 3] }
 budget:
   six_month_total_max: 2000

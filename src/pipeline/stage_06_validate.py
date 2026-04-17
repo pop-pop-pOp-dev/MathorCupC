@@ -18,6 +18,9 @@ def _read_json(path: Path) -> dict:
 
 def run_stage_06_validate(df: pd.DataFrame, plans: pd.DataFrame, run_dir: Path) -> None:
     diagnostics = build_basic_diagnostics(df)
+    strategy_map = _read_json(run_dir / 'optimization' / 'strategy_mapping_summary.json')
+    if strategy_map:
+        diagnostics['strategy_mapping'] = strategy_map
     robustness = summarize_optimization_robustness(plans)
     latent_summary = _read_json(run_dir / 'latent' / 'latent_stability_summary.json')
     risk_summary = _read_json(run_dir / 'risk' / 'risk_threshold_summary.json')

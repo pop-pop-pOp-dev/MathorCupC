@@ -1,16 +1,12 @@
 # MathorCup C题代码框架
 
-本项目实现 2026 年 MathorCup C题：中老年人群高血脂症的风险预警及干预方案优化 的研究型代码框架。
+本项目实现 **2026 年 MathorCup C 题：中老年人群高血脂症的风险预警及干预方案优化** 的可复现流水线（**不使用深度学习**）。
 
-## 核心能力
+## 核心方法（与论文/附录对齐）
 
-- 数据治理与规则校验
-- 临床偏离度与主题特征工程
-- 三视角潜结构与综合隐状态识别
-- 锚定式连续风险分层
-- 痰湿高危核心规则提取
-- 三阶段鲁棒干预优化
-- 稳健性分析与论文资产导出
+- **问题一**：三视角（体质九积分 / 活动 ADL+IADL / 代谢偏离）各 **因子分析（FactorAnalysis）** 提取一阶因子；二阶综合隐状态为对三因子得分的 **一维 PCA**（或配置为固定权重）；输出九体质在一阶因子上的载荷占比及与确诊标签的**单变量对照表**（仅作解释，不作问题二主监督）。
+- **问题二**：以 **血脂+代谢+活动风险** 构造连续临床严重度为 **Ridge 回归目标**，不把二分类确诊标签作为主损失；**画像式锚点** + 网格阈值 + bootstrap；痰湿高危 **组合规则挖掘**（规则池不含「痰湿标签=1」平凡项）。
+- **问题三**：**三阶段整数规划（SciPy MILP）**，约束含题面预算、年龄/活动强度、**痰湿积分—调理档位（附表2）**、训练频次 **1–10 次/周**（可由配置从 `clinical_rules` 全枚举）；情景系数下 **有限情景 min–max**；导出 **患者特征—方案众数映射表**。
 
 ## 快速开始
 
@@ -18,10 +14,48 @@
 python scripts/run_full_pipeline.py
 ```
 
-单独运行：
+分阶段：
 
 ```bash
 python scripts/run_q1.py
 python scripts/run_q2.py
 python scripts/run_q3.py
 ```
+
+## 默认输出目录（`outputs/run_*/`）
+
+| 阶段 | 目录 | 与题目对应 | 关键文件 |
+|------|------|------------|----------|
+| 0 | `governance/` | 数据治理 | `canonical_dataset.csv`、`governance_report.json` |
+| 1 | `latent/` | 问题一 | `latent_state_scores.csv`、`latent_second_order.csv`、`constitution_contributions_to_latent.csv`、`constitution_univariate_risk_association.csv` |
+| 2 | `risk/` | 问题二 | `risk_scores.csv`、`risk_thresholds.json`、`risk_model_coefficients.csv`、`minimal_rules.csv`（由 `rules/` 阶段产出） |
+| 3 | `rules/` | 问题二规则 | `minimal_rules.csv`、`core_rules.csv` |
+| 4 | `optimization/` | 问题三 | `phlegm_patient_plans.csv`、`sample_1_2_3_plans.csv`、`strategy_mapping_by_risk_tier_age.csv` |
+| 5 | `validation/` | 稳健性摘要 | `diagnostics.json`、`optimization_robustness.csv` |
+
+## 主要配置
+
+- `configs/risk_model.yaml`：潜状态提取、风险模型类型（默认 `severity_ridge`）、锚点与阈值、规则阈值。
+- `configs/clinical_rules.yaml`：血脂/代谢区间、活动强度规则、**中医调理档位与痰湿积分区间**、频次上下界。
+- `configs/intervention.yaml`：三阶段月数、目标权重、`frequency_from_clinical_rules`、情景系数等。
+- `configs/performance.yaml`：并行 worker（`n_jobs`）、快速阈值网格（`fast_threshold_grid`）、可选 GPU 线性代数开关（见下）。
+
+## 性能与并行
+
+- **Bootstrap / MILP**：潜状态、风险阈值、规则稳定性及逐患者 MILP 默认通过 **joblib** 并行（`performance.n_jobs`，`-1` 为占满 CPU）。
+- **阈值搜索**：`thresholding.search_risk_thresholds_with_grid` 已改为向量化实现，显著降低 Python 双重循环开销。
+- **潜状态稳定性**：`latent_stability.csv` 与载荷 bootstrap **复用同一次** `bootstrap_latent_loadings` 结果，避免重复拟合因子模型。
+- **可选 GPU**：安装 **CuPy** 且环境变量/配置 `use_gpu_linear_algebra: true` 时，`utils/gpu_optional.py` 可对大规模矩阵做行标准化等（小样本自动走 NumPy）。**SciPy MILP、sklearn 因子分析仍以 CPU 为主**，这与数模场景下的真实瓶颈一致。
+
+## 绘图与论文资产
+
+- 期刊向主题与 **玫瑰红—深蓝** 渐变/发散色盘见 `src/reporting/plot_style.py`；各阶段在 `runtime.plots: true` 时导出 **PNG + 同 stem 的 PDF**（便于 LaTeX 排版）。
+- 主流程仅在 `runtime.plots: true` 时额外写 `risk/continuous_risk_score.png`，与阶段 03 行为一致。
+
+## 代码审查摘要
+
+- 痰湿优化子群与规则阶段对齐：`utils/cohort.phlegm_intervention_cohort()`（优先 `phlegm_dampness_label_flag`，否则 `constitution_label == 5`）。详见 `docs/CODE_REVIEW.md`。
+
+## 说明
+
+- 全文设计文档见根目录与 `docs/` 下的 `整体技术路线框架.md`；其中 **§0.1 已实现边界** 与代码一致，后文理想化扩展写作时请与 §0.1 对齐。

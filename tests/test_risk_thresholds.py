@@ -5,6 +5,7 @@ from models.thresholding import assign_risk_tier, search_risk_thresholds, search
 
 RISK_CONFIG = {
     'risk_score': {
+        'model_type': 'legacy_weighted',
         'weights': {
             'latent_state': 0.30,
             'lipid_deviation_total': 0.35,

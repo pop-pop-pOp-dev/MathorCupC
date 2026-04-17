@@ -5,8 +5,11 @@ stages:
     months: 2
   - name: maintenance
     months: 2
-frequency_candidates: [1, 3, 5, 7, 10]
-beam_width: 64
+# true：使用 clinical_rules.exercise.frequency_range 全枚举 1–10 次/周
+frequency_from_clinical_rules: true
+frequency_candidates: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+metabolic_gain_multiplier:
+  bmi_per_unit: 0.02
 scenarios:
   optimistic: 1.15
   nominal: 1.00

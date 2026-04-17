@@ -10,13 +10,20 @@ TARGET_FLAG = '__target__'
 MASK_FLAG = '__mask__'
 
 
+def build_rule_target(df: pd.DataFrame) -> pd.Series:
+    if 'risk_tier' not in df.columns:
+        return pd.Series(False, index=df.index)
+    return (df['risk_tier'] == 'high').astype(bool)
+
+
 def build_candidate_conditions(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    """候选条件池：不出现「痰湿标签=1」等把目标写进条件式的项，避免平凡规则。"""
     q_latent = df['latent_state_h'].quantile(0.7)
     q_lipid = df['lipid_deviation_total'].quantile(0.7)
     q_meta = df['metabolic_deviation_total'].quantile(0.7)
-    conditions = {
-        '痰湿标签=1': df['phlegm_dampness_label_flag'] == 1,
+    conditions: Dict[str, pd.Series] = {
         '痰湿积分>=60': df['constitution_tanshi'] >= 60,
+        '痰湿积分>=80': df['constitution_tanshi'] >= 80,
         '活动总分<40': df['activity_total'] < 40,
         '活动总分<60': df['activity_total'] < 60,
         'BMI偏离>0': df['dev_bmi'] > 0,
@@ -26,6 +33,16 @@ def build_candidate_conditions(df: pd.DataFrame) -> Dict[str, pd.Series]:
         '血脂偏离总量高': df['lipid_deviation_total'] >= q_lipid,
         '代谢偏离总量高': df['metabolic_deviation_total'] >= q_meta,
     }
+    if 'constitution_tanshi_dominance' in df.columns:
+        conditions['痰湿偏颇占优'] = df['constitution_tanshi_dominance'] >= df['constitution_tanshi_dominance'].quantile(0.75)
+    if 'dev_fasting_glucose' in df.columns:
+        conditions['血糖偏离>0'] = df['dev_fasting_glucose'] > 0
+    if 'dev_uric_acid' in df.columns:
+        conditions['尿酸偏离>0'] = df['dev_uric_acid'] > 0
+    if 'smoking_history' in df.columns:
+        conditions['吸烟史=1'] = df['smoking_history'] == 1
+    if 'drinking_history' in df.columns:
+        conditions['饮酒史=1'] = df['drinking_history'] == 1
     return conditions
 
 
@@ -35,7 +52,7 @@ def enumerate_candidate_rules(
     min_coverage: float = 0.20,
     min_purity: float = 0.60,
 ) -> pd.DataFrame:
-    target = (df['phlegm_dampness_label_flag'] == 1) & (df['risk_tier'] == 'high')
+    target = build_rule_target(df)
     if target.sum() == 0:
         return pd.DataFrame(columns=['rule', 'coverage', 'purity', 'lift', 'size', 'support_n', 'covered_n', 'target_hits', TARGET_FLAG, MASK_FLAG])
     conditions = build_candidate_conditions(df)
@@ -152,7 +169,7 @@ def build_rule_coverage_matrix(df: pd.DataFrame, selected_rules: pd.DataFrame, c
 
 def extract_minimal_rules(df: pd.DataFrame, max_rule_size: int = 3, min_coverage: float = 0.20, min_purity: float = 0.60) -> pd.DataFrame:
     candidates = enumerate_candidate_rules(df, max_rule_size=max_rule_size, min_coverage=min_coverage, min_purity=min_purity)
-    target = (df['phlegm_dampness_label_flag'] == 1) & (df['risk_tier'] == 'high')
+    target = build_rule_target(df)
     selected = select_minimal_rule_set(candidates, target)
     if selected.empty:
         return selected

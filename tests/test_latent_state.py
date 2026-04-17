@@ -3,7 +3,13 @@ import pandas as pd
 from models.latent_state import fit_latent_state, loadings_to_long
 
 
-RISK_CONFIG = {'latent_state': {'view_weights': {'constitution': 0.35, 'activity': 0.25, 'metabolic': 0.40}}}
+RISK_CONFIG = {
+    'latent_state': {
+        'view_weights': {'constitution': 0.35, 'activity': 0.25, 'metabolic': 0.40},
+        'view_extraction': 'pca',
+        'second_order': {'method': 'pca_one_component'},
+    }
+}
 
 
 def build_latent_df(n: int = 20) -> pd.DataFrame:
@@ -28,7 +34,7 @@ def test_latent_state_output_shape_and_range():
 def test_latent_state_view_diagnostics_present():
     df = build_latent_df()
     result = fit_latent_state(df, RISK_CONFIG)
-    assert {'factor_name', 'n_features', 'explained_variance_ratio'} <= set(result.view_diagnostics.columns)
+    assert {'factor_name', 'n_features', 'explained_variance_ratio', 'extraction_method'} <= set(result.view_diagnostics.columns)
     assert result.view_diagnostics['explained_variance_ratio'].between(0, 1).all()
 
 

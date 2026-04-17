@@ -1,0 +1,8 @@
+# 运行性能：并行与可选 GPU（不改变默认方法学结果）
+performance:
+  # joblib 并行 worker 数；-1 表示使用所有逻辑 CPU
+  n_jobs: -1
+  # 为 true 时：阈值网格减半、向量化路径优先（结果数值与全网格可能略有数值差，仅建议调参迭代）
+  fast_threshold_grid: false
+  # 为 true 且已安装 CuPy + 可用 CUDA 时，对大规模矩阵标准化等尝试 GPU（小样本自动回退 CPU）
+  use_gpu_linear_algebra: false

@@ -13,6 +13,7 @@ dependencies = [
   "numpy>=2.0",
   "scipy>=1.13",
   "scikit-learn>=1.5",
+  "joblib>=1.4",
   "statsmodels>=0.14",
   "pyyaml>=6.0",
   "openpyxl>=3.1",

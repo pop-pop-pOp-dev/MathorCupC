@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed, effective_n_jobs
 
+from models.constitution_effects import constitution_contribution_frame
 from models.latent_state import fit_latent_state, loadings_to_long, project_latent_state
 from models.rule_mining import extract_minimal_rules
 from models.thresholding import assign_risk_tier, search_risk_thresholds, search_risk_thresholds_with_grid
+
+
+def _resolve_parallel_n_jobs(n_jobs: int | None) -> int:
+    if n_jobs is None:
+        return int(effective_n_jobs(-1))
+    return int(effective_n_jobs(int(n_jobs)))
 
 
 def _ci_bounds(series: pd.Series, ci_level: float = 0.95) -> tuple[float, float]:
@@ -15,17 +23,29 @@ def _ci_bounds(series: pd.Series, ci_level: float = 0.95) -> tuple[float, float]
     return lower, upper
 
 
-def bootstrap_latent_loadings(df: pd.DataFrame, risk_config: dict, n_boot: int = 20, seed: int = 20260417) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    records: list[dict] = []
-    for i in range(n_boot):
-        sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
-        sampled = df.loc[sample_idx].reset_index(drop=True)
-        result = fit_latent_state(sampled, risk_config)
-        detailed = loadings_to_long(result.loadings)
-        detailed.insert(0, 'bootstrap_id', i)
-        records.extend(detailed.to_dict(orient='records'))
-    return pd.DataFrame(records)
+def _one_bootstrap_latent_loading(i: int, df: pd.DataFrame, risk_config: dict, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed + 91_337 + i)
+    sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
+    sampled = df.loc[sample_idx].reset_index(drop=True)
+    result = fit_latent_state(sampled, risk_config)
+    detailed = loadings_to_long(result.loadings)
+    detailed.insert(0, 'bootstrap_id', i)
+    return detailed
+
+
+def bootstrap_latent_loadings(
+    df: pd.DataFrame,
+    risk_config: dict,
+    n_boot: int = 20,
+    seed: int = 20260417,
+    n_jobs: int | None = None,
+) -> pd.DataFrame:
+    nj = _resolve_parallel_n_jobs(n_jobs)
+    if nj == 1:
+        parts = [_one_bootstrap_latent_loading(i, df, risk_config, seed) for i in range(n_boot)]
+    else:
+        parts = Parallel(n_jobs=nj)(delayed(_one_bootstrap_latent_loading)(i, df, risk_config, seed) for i in range(n_boot))
+    return pd.concat(parts, ignore_index=True)
 
 
 def summarize_latent_bootstrap(loadings_boot: pd.DataFrame, ci_level: float = 0.95) -> pd.DataFrame:
@@ -62,45 +82,69 @@ def summarize_latent_bootstrap(loadings_boot: pd.DataFrame, ci_level: float = 0.
     return pd.DataFrame(rows).sort_values(['factor_name', 'mean_abs_loading'], ascending=[True, False]).reset_index(drop=True)
 
 
+def _one_bootstrap_latent_score_stability(
+    i: int,
+    df: pd.DataFrame,
+    risk_config: dict,
+    reference: pd.DataFrame,
+    ref_top_mask: pd.Series,
+    top_quantile: float,
+    seed: int,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed + 50_003 + i)
+    sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
+    sampled = df.loc[sample_idx].reset_index(drop=True)
+    fitted = fit_latent_state(sampled, risk_config)
+    projected = project_latent_state(df, fitted.view_models, risk_config)
+    records: list[dict] = []
+    for factor_name in ['constitution_factor', 'activity_factor', 'metabolic_factor', 'latent_state_h']:
+        pearson = float(reference[factor_name].corr(projected[factor_name], method='pearson'))
+        spearman = float(reference[factor_name].corr(projected[factor_name], method='spearman'))
+        records.append(
+            {
+                'bootstrap_id': i,
+                'factor_name': factor_name,
+                'pearson_corr': 0.0 if np.isnan(pearson) else pearson,
+                'spearman_corr': 0.0 if np.isnan(spearman) else spearman,
+            }
+        )
+    projected_top_mask = projected['latent_state_h'] >= projected['latent_state_h'].quantile(max(0.0, min(1.0, 1.0 - top_quantile)))
+    inter = int((ref_top_mask & projected_top_mask).sum())
+    union = int((ref_top_mask | projected_top_mask).sum())
+    records.append(
+        {
+            'bootstrap_id': i,
+            'factor_name': 'latent_state_top_group',
+            'pearson_corr': float(inter / union) if union else 0.0,
+            'spearman_corr': float(inter / max(int(ref_top_mask.sum()), 1)),
+        }
+    )
+    return pd.DataFrame(records)
+
+
 def bootstrap_latent_score_stability(
     df: pd.DataFrame,
     risk_config: dict,
     n_boot: int = 20,
     seed: int = 20260417,
     top_quantile: float = 0.20,
+    reference_frame: pd.DataFrame | None = None,
+    n_jobs: int | None = None,
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    reference = fit_latent_state(df, risk_config).frame
+    reference = reference_frame if reference_frame is not None else fit_latent_state(df, risk_config).frame
     ref_top_mask = reference['latent_state_h'] >= reference['latent_state_h'].quantile(max(0.0, min(1.0, 1.0 - top_quantile)))
-    records: list[dict] = []
-    for i in range(n_boot):
-        sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
-        sampled = df.loc[sample_idx].reset_index(drop=True)
-        fitted = fit_latent_state(sampled, risk_config)
-        projected = project_latent_state(df, fitted.view_models, risk_config)
-        for factor_name in ['constitution_factor', 'activity_factor', 'metabolic_factor', 'latent_state_h']:
-            pearson = float(reference[factor_name].corr(projected[factor_name], method='pearson'))
-            spearman = float(reference[factor_name].corr(projected[factor_name], method='spearman'))
-            records.append(
-                {
-                    'bootstrap_id': i,
-                    'factor_name': factor_name,
-                    'pearson_corr': 0.0 if np.isnan(pearson) else pearson,
-                    'spearman_corr': 0.0 if np.isnan(spearman) else spearman,
-                }
-            )
-        projected_top_mask = projected['latent_state_h'] >= projected['latent_state_h'].quantile(max(0.0, min(1.0, 1.0 - top_quantile)))
-        inter = int((ref_top_mask & projected_top_mask).sum())
-        union = int((ref_top_mask | projected_top_mask).sum())
-        records.append(
-            {
-                'bootstrap_id': i,
-                'factor_name': 'latent_state_top_group',
-                'pearson_corr': float(inter / union) if union else 0.0,
-                'spearman_corr': float(inter / max(int(ref_top_mask.sum()), 1)),
-            }
+    nj = _resolve_parallel_n_jobs(n_jobs)
+    if nj == 1:
+        parts = [
+            _one_bootstrap_latent_score_stability(i, df, risk_config, reference, ref_top_mask, top_quantile, seed)
+            for i in range(n_boot)
+        ]
+    else:
+        parts = Parallel(n_jobs=nj)(
+            delayed(_one_bootstrap_latent_score_stability)(i, df, risk_config, reference, ref_top_mask, top_quantile, seed)
+            for i in range(n_boot)
         )
-    return pd.DataFrame(records)
+    return pd.concat(parts, ignore_index=True)
 
 
 def summarize_latent_score_stability(score_stability: pd.DataFrame, ci_level: float = 0.95) -> pd.DataFrame:
@@ -126,9 +170,11 @@ def summarize_latent_score_stability(score_stability: pd.DataFrame, ci_level: fl
     return pd.DataFrame(rows).reset_index(drop=True)
 
 
-def bootstrap_latent_state_stability(df: pd.DataFrame, risk_config: dict, n_boot: int = 20, seed: int = 20260417) -> pd.DataFrame:
-    detailed = bootstrap_latent_loadings(df, risk_config, n_boot=n_boot, seed=seed)
-    summary = summarize_latent_bootstrap(detailed, ci_level=float(risk_config['latent_state'].get('report_ci_level', 0.95)))
+def latent_state_stability_from_loadings_boot(loadings_boot: pd.DataFrame, risk_config: dict) -> pd.DataFrame:
+    """由已算好的载荷 bootstrap 汇总 latent_stability 表，避免重复 fit_latent_state。"""
+    if loadings_boot.empty:
+        return pd.DataFrame(columns=['feature', 'mean_abs_loading', 'std'])
+    summary = summarize_latent_bootstrap(loadings_boot, ci_level=float(risk_config['latent_state'].get('report_ci_level', 0.95)))
     out = summary.groupby('feature', as_index=False).agg(
         mean_abs_loading=('mean_abs_loading', 'mean'),
         std_abs_loading=('mean_abs_loading', 'std'),
@@ -136,20 +182,152 @@ def bootstrap_latent_state_stability(df: pd.DataFrame, risk_config: dict, n_boot
     return out.rename(columns={'std_abs_loading': 'std'})
 
 
-def search_threshold_grid(score: pd.Series, low_anchor: pd.Series, high_anchor: pd.Series, grid_points: int = 60) -> pd.DataFrame:
-    _, _, grid = search_risk_thresholds_with_grid(score, low_anchor, high_anchor, grid_points=grid_points)
+def bootstrap_latent_state_stability(
+    df: pd.DataFrame,
+    risk_config: dict,
+    n_boot: int = 20,
+    seed: int = 20260417,
+    loadings_boot: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """若传入 loadings_boot（与 n_boot 一致），则不再重复 bootstrap_latent_loadings。"""
+    detailed = loadings_boot if loadings_boot is not None else bootstrap_latent_loadings(df, risk_config, n_boot=n_boot, seed=seed)
+    return latent_state_stability_from_loadings_boot(detailed, risk_config)
+
+
+def _one_bootstrap_constitution_contribution(i: int, df: pd.DataFrame, risk_config: dict, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed + 77_777 + i)
+    sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
+    sampled = df.loc[sample_idx].reset_index(drop=True)
+    result = fit_latent_state(sampled, risk_config)
+    contrib = constitution_contribution_frame(result.loadings)
+    if contrib.empty:
+        return pd.DataFrame()
+    contrib = contrib.copy()
+    contrib.insert(0, 'bootstrap_id', i)
+    return contrib
+
+
+def bootstrap_constitution_contributions(
+    df: pd.DataFrame,
+    risk_config: dict,
+    n_boot: int = 20,
+    seed: int = 20260417,
+    n_jobs: int | None = None,
+) -> pd.DataFrame:
+    nj = _resolve_parallel_n_jobs(n_jobs)
+    if nj == 1:
+        parts = [_one_bootstrap_constitution_contribution(i, df, risk_config, seed) for i in range(n_boot)]
+    else:
+        parts = Parallel(n_jobs=nj)(delayed(_one_bootstrap_constitution_contribution)(i, df, risk_config, seed) for i in range(n_boot))
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def summarize_constitution_contributions(contribution_boot: pd.DataFrame, ci_level: float = 0.95) -> pd.DataFrame:
+    if contribution_boot.empty:
+        return pd.DataFrame(
+            columns=[
+                'constitution_feature',
+                'mean_loading',
+                'std_loading',
+                'loading_ci_lower',
+                'loading_ci_upper',
+                'mean_abs_share',
+                'std_abs_share',
+                'abs_share_ci_lower',
+                'abs_share_ci_upper',
+                'sign_consistency',
+            ]
+        )
+    rows: list[dict] = []
+    for constitution_feature, group in contribution_boot.groupby('constitution_feature'):
+        loading_ci_lower, loading_ci_upper = _ci_bounds(group['loading'], ci_level=ci_level)
+        share_ci_lower, share_ci_upper = _ci_bounds(group['abs_share'], ci_level=ci_level)
+        sign_consistency = max((group['loading'] >= 0).mean(), (group['loading'] <= 0).mean())
+        rows.append(
+            {
+                'constitution_feature': constitution_feature,
+                'mean_loading': float(group['loading'].mean()),
+                'std_loading': float(group['loading'].std(ddof=0)),
+                'loading_ci_lower': loading_ci_lower,
+                'loading_ci_upper': loading_ci_upper,
+                'mean_abs_share': float(group['abs_share'].mean()),
+                'std_abs_share': float(group['abs_share'].std(ddof=0)),
+                'abs_share_ci_lower': share_ci_lower,
+                'abs_share_ci_upper': share_ci_upper,
+                'sign_consistency': float(sign_consistency),
+            }
+        )
+    return pd.DataFrame(rows).sort_values('mean_abs_share', ascending=False).reset_index(drop=True)
+
+
+def search_threshold_grid(
+    score: pd.Series,
+    low_anchor: pd.Series,
+    high_anchor: pd.Series,
+    grid_points: int = 60,
+    severity: pd.Series | None = None,
+    min_group_share: float = 0.10,
+) -> pd.DataFrame:
+    _, _, grid = search_risk_thresholds_with_grid(
+        score,
+        low_anchor,
+        high_anchor,
+        grid_points=grid_points,
+        severity=severity,
+        min_group_share=min_group_share,
+    )
     return grid
 
 
-def bootstrap_threshold_stability(score: pd.Series, low_anchor: pd.Series, high_anchor: pd.Series, n_boot: int = 20, seed: int = 20260417) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    records = []
+def _one_bootstrap_threshold(
+    i: int,
+    score: pd.Series,
+    low_anchor: pd.Series,
+    high_anchor: pd.Series,
+    severity_series: pd.Series | None,
+    min_group_share: float,
+    seed: int,
+) -> dict[str, float | int]:
+    rng = np.random.default_rng(seed + 33_221 + i)
     idx = np.arange(len(score))
-    for i in range(n_boot):
-        sample = rng.choice(idx, size=len(idx), replace=True)
-        t1, t2 = search_risk_thresholds(score.iloc[sample].reset_index(drop=True), low_anchor.iloc[sample].reset_index(drop=True), high_anchor.iloc[sample].reset_index(drop=True))
-        records.append({'bootstrap_id': i, 't1': t1, 't2': t2, 'threshold_gap': float(t2 - t1)})
-    return pd.DataFrame(records)
+    sample = rng.choice(idx, size=len(idx), replace=True)
+    severity_sample = severity_series.iloc[sample].reset_index(drop=True) if severity_series is not None else None
+    t1, t2 = search_risk_thresholds(
+        score.iloc[sample].reset_index(drop=True),
+        low_anchor.iloc[sample].reset_index(drop=True),
+        high_anchor.iloc[sample].reset_index(drop=True),
+        severity=severity_sample,
+        min_group_share=min_group_share,
+    )
+    return {'bootstrap_id': i, 't1': t1, 't2': t2, 'threshold_gap': float(t2 - t1)}
+
+
+def bootstrap_threshold_stability(
+    score: pd.Series,
+    low_anchor: pd.Series,
+    high_anchor: pd.Series,
+    n_boot: int = 20,
+    seed: int = 20260417,
+    severity: pd.Series | None = None,
+    min_group_share: float = 0.10,
+    n_jobs: int | None = None,
+) -> pd.DataFrame:
+    severity_series = severity.reset_index(drop=True) if severity is not None else None
+    nj = _resolve_parallel_n_jobs(n_jobs)
+    if nj == 1:
+        rows = [
+            _one_bootstrap_threshold(i, score, low_anchor, high_anchor, severity_series, min_group_share, seed)
+            for i in range(n_boot)
+        ]
+    else:
+        rows = Parallel(n_jobs=nj)(
+            delayed(_one_bootstrap_threshold)(i, score, low_anchor, high_anchor, severity_series, min_group_share, seed)
+            for i in range(n_boot)
+        )
+    return pd.DataFrame(rows)
 
 
 def summarize_threshold_stability(threshold_boot: pd.DataFrame, ci_level: float = 0.95) -> pd.DataFrame:
@@ -211,6 +389,31 @@ def summarize_tier_distribution(tier_bootstrap: pd.DataFrame, ci_level: float = 
     return pd.DataFrame(rows)
 
 
+def _one_bootstrap_rule(
+    i: int,
+    df: pd.DataFrame,
+    max_rule_size: int,
+    min_coverage: float,
+    min_purity: float,
+    seed: int,
+) -> pd.DataFrame:
+    rng = np.random.default_rng(seed + 12_345 + i)
+    sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
+    sampled = df.loc[sample_idx].reset_index(drop=True)
+    rules = extract_minimal_rules(
+        sampled,
+        max_rule_size=max_rule_size,
+        min_coverage=min_coverage,
+        min_purity=min_purity,
+    )
+    if rules.empty:
+        return pd.DataFrame()
+    rules = rules.copy()
+    rules['bootstrap_id'] = i
+    rules['selected_flag'] = 1
+    return rules
+
+
 def bootstrap_rule_stability(
     df: pd.DataFrame,
     max_rule_size: int = 3,
@@ -218,25 +421,19 @@ def bootstrap_rule_stability(
     min_purity: float = 0.60,
     n_boot: int = 20,
     seed: int = 20260417,
+    n_jobs: int | None = None,
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    records: list[dict] = []
-    for i in range(n_boot):
-        sample_idx = rng.choice(df.index.to_numpy(), size=len(df), replace=True)
-        sampled = df.loc[sample_idx].reset_index(drop=True)
-        rules = extract_minimal_rules(
-            sampled,
-            max_rule_size=max_rule_size,
-            min_coverage=min_coverage,
-            min_purity=min_purity,
+    nj = _resolve_parallel_n_jobs(n_jobs)
+    if nj == 1:
+        parts = [_one_bootstrap_rule(i, df, max_rule_size, min_coverage, min_purity, seed) for i in range(n_boot)]
+    else:
+        parts = Parallel(n_jobs=nj)(
+            delayed(_one_bootstrap_rule)(i, df, max_rule_size, min_coverage, min_purity, seed) for i in range(n_boot)
         )
-        if rules.empty:
-            continue
-        rules = rules.copy()
-        rules['bootstrap_id'] = i
-        rules['selected_flag'] = 1
-        records.extend(rules.to_dict(orient='records'))
-    return pd.DataFrame(records)
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
 
 
 def summarize_rule_stability(rule_bootstrap: pd.DataFrame, n_boot: int, ci_level: float = 0.95) -> pd.DataFrame:

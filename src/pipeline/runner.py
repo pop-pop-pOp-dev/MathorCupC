@@ -33,6 +33,7 @@ def run_full_pipeline(project_root: str | Path | None = None):
     plans = run_stage_05_optimize(df, config, run_dir)
     logger.info('Running stage 06: validation')
     run_stage_06_validate(df, plans, run_dir)
-    plot_risk_distribution(df, run_dir / 'risk' / 'continuous_risk_score.png')
+    if config['runtime'].get('plots', False):
+        plot_risk_distribution(df, run_dir / 'risk' / 'continuous_risk_score.png')
     logger.info('Pipeline finished: %s', run_dir)
     return run_dir

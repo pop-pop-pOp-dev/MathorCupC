@@ -27,9 +27,11 @@ def load_project_config(root: str | Path) -> Dict[str, Any]:
     clinical = load_yaml(root / 'configs' / 'clinical_rules.yaml')
     risk = load_yaml(root / 'configs' / 'risk_model.yaml')
     intervention = load_yaml(root / 'configs' / 'intervention.yaml')
+    performance = load_yaml(root / 'configs' / 'performance.yaml')
     merged = deep_merge(base, {'schema': schema})
     merged = deep_merge(merged, {'clinical_rules': clinical})
     merged = deep_merge(merged, {'risk_model': risk})
     merged = deep_merge(merged, {'intervention': intervention})
+    merged = deep_merge(merged, {'performance': performance})
     merged['project_root'] = str(root)
     return merged
