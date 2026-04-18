@@ -1,6 +1,11 @@
 import pandas as pd
 
-from evaluation.evidence import ablate_risk_models, risk_model_significance
+from evaluation.evidence import (
+    ablate_risk_models,
+    benchmark_leakage_designs,
+    build_problem_bridge_evidence,
+    risk_model_significance,
+)
 
 
 RISK_CONFIG = {
@@ -92,3 +97,20 @@ def test_risk_significance_outputs_comparison_rows():
     assert not out.empty
     assert {'baseline_or_ablation', 'metric', 'observed_improvement', 'ci_lower', 'ci_upper', 'p_value_two_sided'} <= set(out.columns)
     assert {'旧版手工加权', '连续严重度 Ridge'} <= set(out['baseline_or_ablation'])
+
+
+def test_problem_bridge_outputs_have_expected_frames():
+    df = build_df()
+    df['risk_prob'] = (df['hyperlipidemia_label'] * 0.6 + 0.2).clip(0, 1)
+    df['continuous_risk_score'] = df['risk_prob'] * 100
+    df['reference_severity'] = df['metabolic_deviation_total']
+    out = build_problem_bridge_evidence(df, RISK_CONFIG)
+    assert not out['view_semantics'].empty
+    assert not out['latent_risk_bridge'].empty
+    assert 'scalar_ranking_utility' in out
+
+
+def test_leakage_benchmark_returns_strict_and_wide_rows():
+    benchmark, significance = benchmark_leakage_designs(build_df(), RISK_CONFIG, seed=7)
+    assert {'严格前置预警模型', '宽松含血脂模型'} <= set(benchmark['label'])
+    assert not significance.empty

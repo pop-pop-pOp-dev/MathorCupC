@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -335,6 +336,216 @@ def plot_rule_purity_vs_coverage(rules: pd.DataFrame, path: str | Path) -> None:
     ax.set_ylim(-0.02, min(1.02, float(rules['purity'].max()) + 0.05))
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_constitution_contribution_bar(contrib: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if contrib.empty:
+        return
+    plot_df = contrib.sort_values('abs_share', ascending=True)
+    fig, ax = plt.subplots(figsize=(9.4, max(4.6, 0.42 * len(plot_df))))
+    colors = CMAP_SEQUENTIAL(np.linspace(0.25, 0.95, len(plot_df)))
+    ax.barh(plot_df['constitution_feature'], plot_df['abs_share'], color=colors, edgecolor='white', linewidth=0.5)
+    ax.set_title('Constitution contribution to first-order latent view', fontsize=12, pad=10)
+    ax.set_xlabel('Absolute loading share')
+    ax.set_ylabel('Constitution feature')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_problem_bridge_heatmap(bridge_df: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if bridge_df.empty:
+        return
+    pivot = bridge_df.pivot_table(index='source_feature', columns='target_metric', values='pearson_corr', aggfunc='mean')
+    fig, ax = plt.subplots(figsize=(7.8, 4.8))
+    sns.heatmap(
+        pivot,
+        annot=True,
+        fmt='.2f',
+        cmap=CMAP_DIVERGING,
+        center=0,
+        linewidths=0.4,
+        linecolor='white',
+        cbar_kws={'label': 'Pearson correlation', 'shrink': 0.82},
+        ax=ax,
+    )
+    ax.set_title('Bridge from latent structure to risk outputs', fontsize=12, pad=10)
+    ax.set_xlabel('Problem 2 target')
+    ax.set_ylabel('Problem 1 factor')
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_threshold_bootstrap_distributions(threshold_boot: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if threshold_boot.empty:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(11.8, 3.8))
+    for ax, metric, color in zip(axes, ['t1', 't2', 'threshold_gap'], [BLUE_MID, ROSE, BLUE_DEEP]):
+        sns.histplot(threshold_boot[metric], bins=14, kde=True, color=color, ax=ax, edgecolor='white', linewidth=0.4)
+        ax.set_title(metric)
+        ax.set_xlabel(metric)
+        ax.set_ylabel('Count')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    fig.suptitle('Bootstrap distributions of selected thresholds', fontsize=12, y=1.03)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_tier_feature_gradient(gradient_long: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if gradient_long.empty:
+        return
+    plot_df = gradient_long.copy()
+    fig, ax = plt.subplots(figsize=(10.4, 5.2))
+    sns.lineplot(
+        data=plot_df,
+        x='risk_tier',
+        y='normalized_mean',
+        hue='feature',
+        style='feature',
+        markers=True,
+        dashes=False,
+        linewidth=2.0,
+        ax=ax,
+        palette=list(CMAP_SEQUENTIAL(np.linspace(0.18, 0.96, plot_df['feature'].nunique()))),
+    )
+    ax.set_title('Feature gradients across low / medium / high risk tiers', fontsize=12, pad=10)
+    ax.set_xlabel('Risk tier')
+    ax.set_ylabel('Normalized mean')
+    ax.set_ylim(-0.02, 1.02)
+    ax.legend(title='Feature', bbox_to_anchor=(1.02, 1), loc='upper left', frameon=True)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_strategy_mapping_heatmap(driver_summary: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if driver_summary.empty:
+        return
+    plot_df = driver_summary.copy()
+    pivot = plot_df.pivot_table(index='age_group', columns='risk_tier', values='first_stage_intensity_mode', aggfunc='mean')
+    fig, ax = plt.subplots(figsize=(6.8, 4.8))
+    sns.heatmap(
+        pivot.sort_index(),
+        annot=True,
+        fmt='.1f',
+        cmap=CMAP_SEQUENTIAL,
+        linewidths=0.35,
+        linecolor='white',
+        cbar_kws={'label': 'Recommended first-stage intensity', 'shrink': 0.82},
+        ax=ax,
+    )
+    ax.set_title('Patient feature to first-stage intensity mapping', fontsize=12, pad=10)
+    ax.set_xlabel('Risk tier')
+    ax.set_ylabel('Age group')
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_optimization_budget_shift(budget_shift: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if budget_shift.empty:
+        return
+    fig, ax1 = plt.subplots(figsize=(8.4, 4.8))
+    ax1.plot(budget_shift['budget_cap'], budget_shift['mean_final_tanshi'], color=ROSE, marker='o', lw=2.0, label='Mean final tanshi')
+    ax1.set_xlabel('Budget cap')
+    ax1.set_ylabel('Mean final tanshi', color=ROSE)
+    ax1.tick_params(axis='y', labelcolor=ROSE)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax2 = ax1.twinx()
+    ax2.plot(
+        budget_shift['budget_cap'],
+        budget_shift['first_stage_frequency_mean'],
+        color=BLUE_MID,
+        marker='s',
+        lw=1.8,
+        label='Mean first-stage frequency',
+    )
+    ax2.set_ylabel('Mean first-stage frequency', color=BLUE_MID)
+    ax2.tick_params(axis='y', labelcolor=BLUE_MID)
+    fig.suptitle('Budget shift in effect and intervention intensity', fontsize=12, y=1.02)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_sample_plan_paths(sample_df: pd.DataFrame, path: str | Path) -> None:
+    path = _prepare_path(path)
+    if sample_df.empty:
+        return
+    records: list[dict[str, float | int | str]] = []
+    for _, row in sample_df.iterrows():
+        sample_id = int(row['sample_id'])
+        plan_value = row.get('plan')
+        if isinstance(plan_value, list):
+            plan = plan_value
+        else:
+            try:
+                plan = ast.literal_eval(str(plan_value)) if pd.notna(plan_value) else []
+            except Exception:
+                plan = []
+        if isinstance(plan, list) and plan:
+            for stage_idx, triple in enumerate(plan, start=1):
+                tcm, intensity, frequency = triple
+                records.append({'sample_id': sample_id, 'stage_idx': stage_idx, 'metric': 'tcm_level', 'value': float(tcm)})
+                records.append({'sample_id': sample_id, 'stage_idx': stage_idx, 'metric': 'intensity', 'value': float(intensity)})
+                records.append({'sample_id': sample_id, 'stage_idx': stage_idx, 'metric': 'frequency', 'value': float(frequency)})
+        else:
+            records.append({'sample_id': sample_id, 'stage_idx': 1, 'metric': 'tcm_level', 'value': float(row.get('first_stage_tcm', np.nan))})
+            records.append({'sample_id': sample_id, 'stage_idx': 1, 'metric': 'intensity', 'value': float(row.get('first_stage_intensity', np.nan))})
+            records.append({'sample_id': sample_id, 'stage_idx': 1, 'metric': 'frequency', 'value': float(row.get('first_stage_frequency', np.nan))})
+    plot_df = pd.DataFrame(records)
+    if plot_df.empty:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.0), sharex=True)
+    for ax, metric, title in zip(axes, ['tcm_level', 'intensity', 'frequency'], ['TCM level', 'Intensity', 'Frequency']):
+        sub = plot_df[plot_df['metric'] == metric]
+        sns.lineplot(data=sub, x='stage_idx', y='value', hue='sample_id', marker='o', linewidth=2.0, ax=ax)
+        ax.set_title(title)
+        ax.set_xlabel('Stage')
+        ax.set_ylabel(title)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    fig.suptitle('Sample 1 / 2 / 3 intervention paths', fontsize=12, y=1.03)
+    plt.tight_layout()
+    save_figure(path, fig)
+    plt.close(fig)
+
+
+def plot_workflow_overview(path: str | Path) -> None:
+    path = _prepare_path(path)
+    fig, ax = plt.subplots(figsize=(10.4, 3.8))
+    ax.axis('off')
+    boxes = [
+        (0.05, 0.35, 0.18, 0.30, BLUE_LIGHT, 'Data\ngovernance'),
+        (0.28, 0.35, 0.18, 0.30, BLUE_MID, 'Problem 1\nlatent structure'),
+        (0.51, 0.35, 0.18, 0.30, ROSE_LIGHT, 'Problem 2\nrisk stratification'),
+        (0.74, 0.35, 0.18, 0.30, ROSE, 'Problem 3\nintervention optimization'),
+    ]
+    for x, y, w, h, color, label in boxes:
+        rect = plt.Rectangle((x, y), w, h, facecolor=color, edgecolor='white', linewidth=1.5, alpha=0.95)
+        ax.add_patch(rect)
+        ax.text(x + w / 2, y + h / 2, label, ha='center', va='center', fontsize=11, color='white', weight='bold')
+    for start_x in [0.23, 0.46, 0.69]:
+        ax.annotate('', xy=(start_x + 0.05, 0.5), xytext=(start_x, 0.5), arrowprops=dict(arrowstyle='->', color=BLUE_DEEP, lw=2.0))
+    ax.text(0.5, 0.86, 'MathorCup C closed-loop workflow', ha='center', va='center', fontsize=13, weight='bold')
+    ax.text(0.5, 0.16, 'latent structure -> calibrated warning -> constrained personalized intervention', ha='center', va='center', fontsize=10, color=BLUE_DEEP)
     plt.tight_layout()
     save_figure(path, fig)
     plt.close(fig)

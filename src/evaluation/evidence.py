@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
+from sklearn.decomposition import PCA
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
 from domain.intervention_rules import build_patient_response_profile, fit_transition_calibration, tolerance_capacity
@@ -186,12 +187,16 @@ def _build_risk_variant_config(
     model_type: str,
     drop_base: tuple[str, ...] = (),
     drop_interactions: tuple[str, ...] = (),
+    add_base: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     cfg = deepcopy(risk_config)
     risk_section = cfg.get('risk_score', cfg)
     risk_section['model_type'] = model_type
     features = deepcopy(risk_section.get('features', {}))
     base = [str(x) for x in features.get('base', []) if str(x) not in set(drop_base)]
+    for feature in add_base:
+        if str(feature) not in base:
+            base.append(str(feature))
     interactions = {
         str(name): [str(t) for t in terms]
         for name, terms in (features.get('interactions', {}) or {}).items()
@@ -213,6 +218,7 @@ def _run_risk_variant(
     label: str,
     drop_base: tuple[str, ...] = (),
     drop_interactions: tuple[str, ...] = (),
+    add_base: tuple[str, ...] = (),
     seed: int = 20260417,
 ) -> tuple[dict[str, Any], np.ndarray | None]:
     cfg = _build_risk_variant_config(
@@ -220,6 +226,7 @@ def _run_risk_variant(
         model_type=model_type,
         drop_base=drop_base,
         drop_interactions=drop_interactions,
+        add_base=add_base,
     )
     y = _safe_binary_label(df)
     anchors = build_diagnosis_anchor_flags(df)
@@ -254,6 +261,128 @@ def _run_risk_variant(
     return row, prob
 
 
+def build_problem_bridge_evidence(df: pd.DataFrame, risk_config: dict[str, Any]) -> dict[str, pd.DataFrame | dict[str, Any]]:
+    rows = [
+        {
+            'factor_name': 'constitution_factor',
+            'view_label_cn': '体质偏颇视角',
+            'clinical_meaning_cn': '对应九种体质偏颇程度，刻画痰湿及相关偏颇体质在整体体质结构中的位置',
+            'problem2_role': '作为前置结构特征进入风险模型，也进入阈值严重度参考',
+        },
+        {
+            'factor_name': 'activity_factor',
+            'view_label_cn': '功能状态视角',
+            'clinical_meaning_cn': '对应 ADL/IADL 与活动能力，反映日常活动受限及功能状态下降',
+            'problem2_role': '作为前置结构特征进入风险模型，也进入阈值严重度参考',
+        },
+        {
+            'factor_name': 'metabolic_factor',
+            'view_label_cn': '代谢偏离视角',
+            'clinical_meaning_cn': '对应 BMI、血糖、尿酸及血脂偏离所形成的代谢异常强度',
+            'problem2_role': '作为问题一结构解释输出；严格预警中不直接喂入该综合项，而拆回前置代谢偏离特征使用',
+        },
+        {
+            'factor_name': 'latent_state_h',
+            'view_label_cn': '二阶综合潜状态',
+            'clinical_meaning_cn': '对三类一阶因子进行综合，用作整体严重程度结构表征',
+            'problem2_role': '用于解释风险层级与结构梯度，不作为严格预警主输入以避免综合诊断结构反向泄露',
+        },
+    ]
+    semantics = pd.DataFrame(rows)
+
+    score_cols = [c for c in ['constitution_factor', 'activity_factor', 'metabolic_factor'] if c in df.columns]
+    dimensionality = pd.DataFrame()
+    dimensionality_summary: dict[str, Any] = {}
+    if len(score_cols) >= 2:
+        z = df[score_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+        z = (z - z.mean()) / (z.std(ddof=0) + 1e-9)
+        pca = PCA(n_components=len(score_cols), random_state=0)
+        pca.fit(z.to_numpy(dtype=float))
+        cum = np.cumsum(pca.explained_variance_ratio_)
+        dimensionality = pd.DataFrame(
+            {
+                'component': [f'PC{i + 1}' for i in range(len(score_cols))],
+                'explained_variance_ratio': pca.explained_variance_ratio_,
+                'cumulative_explained_variance_ratio': cum,
+            }
+        )
+        dimensionality_summary = {
+            'selected_second_order_dimension': 1,
+            'pc1_explained_variance_ratio': float(pca.explained_variance_ratio_[0]),
+            'components_for_80pct_variance': int(np.searchsorted(cum, 0.80) + 1),
+        }
+
+    target_cols = [c for c in ['continuous_risk_score', 'risk_prob', 'reference_severity', 'hyperlipidemia_label'] if c in df.columns]
+    bridge_rows: list[dict[str, Any]] = []
+    for feature in ['constitution_factor', 'activity_factor', 'metabolic_factor', 'latent_state_h']:
+        if feature not in df.columns:
+            continue
+        feature_series = pd.to_numeric(df[feature], errors='coerce').fillna(0.0)
+        for target in target_cols:
+            target_series = pd.to_numeric(df[target], errors='coerce').fillna(0.0)
+            bridge_rows.append(
+                {
+                    'source_feature': feature,
+                    'target_metric': target,
+                    'pearson_corr': float(feature_series.corr(target_series, method='pearson')),
+                    'spearman_corr': float(feature_series.corr(target_series, method='spearman')),
+                }
+            )
+    bridge_frame = pd.DataFrame(bridge_rows)
+    scalar_utility_rows: list[dict[str, Any]] = []
+    y = _safe_binary_label(df)
+    if y is not None:
+        for feature in ['constitution_factor', 'activity_factor', 'metabolic_factor', 'latent_state_h']:
+            if feature not in df.columns:
+                continue
+            values = pd.to_numeric(df[feature], errors='coerce').fillna(0.0)
+            scaled = (values - values.min()) / (values.max() - values.min() + 1e-9)
+            scalar_utility_rows.append(
+                {
+                    'scalar_index': feature,
+                    'diagnosis_auc': float(roc_auc_score(y, scaled)),
+                    'diagnosis_pr_auc': float(average_precision_score(y, scaled)),
+                    'spearman_with_risk_score': float(values.corr(pd.to_numeric(df['continuous_risk_score'], errors='coerce').fillna(0.0), method='spearman')) if 'continuous_risk_score' in df.columns else np.nan,
+                }
+            )
+    scalar_utility = pd.DataFrame(scalar_utility_rows).sort_values('diagnosis_auc', ascending=False).reset_index(drop=True) if scalar_utility_rows else pd.DataFrame()
+
+    risk_section = risk_config.get('risk_score', risk_config)
+    base_features = {str(x) for x in risk_section.get('features', {}).get('base', [])}
+    severity_features = {str(x) for x in (risk_config.get('thresholds', {}).get('severity_features', {}) or {}).keys()}
+    role_rows = []
+    for variable, origin, note in [
+        ('constitution_factor', '问题一一阶因子', '结构变量，直接进入问题二主模型'),
+        ('activity_factor', '问题一一阶因子', '结构变量，直接进入问题二主模型'),
+        ('metabolic_factor', '问题一一阶因子', '仅保留为问题一结构解释，不直接进入严格主模型'),
+        ('latent_state_h', '问题一二阶综合潜状态', '用于解释和验证风险梯度，不直接进入严格主模型'),
+        ('metabolic_deviation_total', '问题一代谢视角原始前置指标', '拆回前置代谢偏离特征进入问题二'),
+        ('constitution_tanshi', '题面核心体质指标', '与问题一体质视角共同支撑问题二'),
+    ]:
+        role_rows.append(
+            {
+                'variable': variable,
+                'origin': origin,
+                'used_in_problem2_model': bool(variable in base_features),
+                'used_in_threshold_reference': bool(variable in severity_features),
+                'recommended_narrative_role': note,
+            }
+        )
+    role_map = pd.DataFrame(role_rows)
+    return {
+        'view_semantics': semantics,
+        'second_order_dimensionality': dimensionality,
+        'latent_risk_bridge': bridge_frame,
+        'scalar_ranking_utility': scalar_utility,
+        'problem_bridge_role_map': role_map,
+        'problem_bridge_summary': {
+            **dimensionality_summary,
+            'scalar_index_best_auc': float(scalar_utility['diagnosis_auc'].max()) if not scalar_utility.empty else None,
+            'scalar_index_best_name': str(scalar_utility.iloc[0]['scalar_index']) if not scalar_utility.empty else None,
+        },
+    }
+
+
 def benchmark_risk_models(df: pd.DataFrame, risk_config: dict[str, Any], seed: int = 20260417) -> pd.DataFrame:
     variants = [
         ('anchor_front_logistic', '主模型', (), ()),
@@ -273,6 +402,50 @@ def benchmark_risk_models(df: pd.DataFrame, risk_config: dict[str, Any], seed: i
         )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def benchmark_leakage_designs(df: pd.DataFrame, risk_config: dict[str, Any], seed: int = 20260417) -> tuple[pd.DataFrame, pd.DataFrame]:
+    diagnostic_candidates = tuple(
+        feature
+        for feature in ['tc', 'tg', 'ldl_c', 'hdl_c', 'dev_tc', 'dev_tg', 'dev_ldl_c', 'dev_hdl_c', 'lipid_deviation_total', 'latent_state_h', 'metabolic_factor']
+        if feature in df.columns
+    )
+    variants = [
+        ('anchor_front_logistic', '严格前置预警模型', (), (), ()),
+        ('diagnostic_wide_logistic', '宽松含血脂模型', (), (), diagnostic_candidates),
+    ]
+    rows: list[dict[str, Any]] = []
+    pred_map: dict[str, np.ndarray] = {}
+    y = _safe_binary_label(df)
+    for model_type, label, drop_base, drop_inter, add_base in variants:
+        row, prob = _run_risk_variant(
+            df,
+            risk_config,
+            model_type=model_type,
+            label=label,
+            drop_base=drop_base,
+            drop_interactions=drop_inter,
+            add_base=add_base,
+            seed=seed,
+        )
+        rows.append(row)
+        if prob is not None:
+            pred_map[label] = prob
+    benchmark = pd.DataFrame(rows)
+    if y is None or '严格前置预警模型' not in pred_map or '宽松含血脂模型' not in pred_map:
+        return benchmark, pd.DataFrame()
+    significance_rows = []
+    for metric in ['roc_auc', 'pr_auc', 'brier_score', 'log_loss']:
+        sig = _paired_bootstrap_metric_improvement(
+            y,
+            pred_map['宽松含血脂模型'],
+            pred_map['严格前置预警模型'],
+            metric,
+            n_boot=400,
+            seed=seed,
+        )
+        significance_rows.append({'comparison': '宽松含血脂模型_vs_严格前置预警模型', 'metric': metric, **sig})
+    return benchmark, pd.DataFrame(significance_rows)
 
 
 def ablate_risk_models(df: pd.DataFrame, risk_config: dict[str, Any], seed: int = 20260417) -> pd.DataFrame:
@@ -353,6 +526,108 @@ def risk_model_significance(df: pd.DataFrame, risk_config: dict[str, Any], seed:
     return pd.DataFrame(rows)
 
 
+def build_threshold_explanation_outputs(
+    df: pd.DataFrame,
+    threshold_grid: pd.DataFrame,
+    threshold_boot: pd.DataFrame,
+    thresholds_payload: dict[str, Any],
+) -> dict[str, pd.DataFrame]:
+    out: dict[str, pd.DataFrame] = {
+        'threshold_selected_row': pd.DataFrame(),
+        'threshold_bootstrap_intervals': pd.DataFrame(),
+        'threshold_alignment': pd.DataFrame(),
+        'risk_tier_feature_gradient': pd.DataFrame(),
+        'risk_tier_feature_gradient_long': pd.DataFrame(),
+    }
+    if threshold_grid.empty:
+        return out
+    t1 = float(thresholds_payload.get('low_to_medium_threshold', threshold_grid['t1'].median()))
+    t2 = float(thresholds_payload.get('medium_to_high_threshold', threshold_grid['t2'].median()))
+    chosen_idx = ((threshold_grid['t1'] - t1).abs() + (threshold_grid['t2'] - t2).abs()).idxmin()
+    out['threshold_selected_row'] = threshold_grid.loc[[chosen_idx]].reset_index(drop=True)
+
+    if not threshold_boot.empty:
+        rows = []
+        for metric in ['t1', 't2', 'threshold_gap']:
+            series = pd.to_numeric(threshold_boot[metric], errors='coerce').dropna()
+            rows.append(
+                {
+                    'metric': metric,
+                    'mean': float(series.mean()),
+                    'std': float(series.std(ddof=0)),
+                    'p05': float(series.quantile(0.05)),
+                    'p25': float(series.quantile(0.25)),
+                    'p50': float(series.quantile(0.50)),
+                    'p75': float(series.quantile(0.75)),
+                    'p95': float(series.quantile(0.95)),
+                }
+            )
+        out['threshold_bootstrap_intervals'] = pd.DataFrame(rows)
+
+    alignment_rows = []
+    if 'continuous_risk_score' in df.columns:
+        score = pd.to_numeric(df['continuous_risk_score'], errors='coerce').fillna(0.0)
+        low_anchor = pd.to_numeric(df.get('low_anchor', 0), errors='coerce').fillna(0).astype(int)
+        high_anchor = pd.to_numeric(df.get('high_anchor', 0), errors='coerce').fillna(0).astype(int)
+        alignment_rows.append(
+            {
+                'threshold_name': 't1_low_to_medium',
+                'threshold_value': t1,
+                'score_percentile': float((score <= t1).mean()),
+                'anchor_alignment': float((score[low_anchor == 1] < t1).mean()) if int((low_anchor == 1).sum()) else np.nan,
+                'narrative': '低锚点落入低风险组的比例',
+            }
+        )
+        alignment_rows.append(
+            {
+                'threshold_name': 't2_medium_to_high',
+                'threshold_value': t2,
+                'score_percentile': float((score <= t2).mean()),
+                'anchor_alignment': float((score[high_anchor == 1] >= t2).mean()) if int((high_anchor == 1).sum()) else np.nan,
+                'narrative': '高锚点落入高风险组的比例',
+            }
+        )
+    out['threshold_alignment'] = pd.DataFrame(alignment_rows)
+
+    gradient_cols = [
+        c for c in [
+            'constitution_tanshi',
+            'activity_total',
+            'dev_bmi',
+            'dev_fasting_glucose',
+            'dev_uric_acid',
+            'metabolic_deviation_total',
+            'latent_state_h',
+            'continuous_risk_score',
+        ]
+        if c in df.columns
+    ]
+    if 'risk_tier' in df.columns and gradient_cols:
+        work = df.copy()
+        if 'hyperlipidemia_label' in work.columns:
+            work['hyperlipidemia_label'] = pd.to_numeric(work['hyperlipidemia_label'], errors='coerce').fillna(0.0)
+        agg_spec: dict[str, tuple[str, str]] = {col: (col, 'mean') for col in gradient_cols}
+        agg_spec['sample_count'] = ('risk_tier', 'size')
+        if 'hyperlipidemia_label' in work.columns:
+            agg_spec['confirmed_rate'] = ('hyperlipidemia_label', 'mean')
+        gradient = work.groupby('risk_tier', as_index=False).agg(**agg_spec)
+        order = {'low': 0, 'medium': 1, 'high': 2}
+        gradient['tier_order'] = gradient['risk_tier'].map(order)
+        gradient = gradient.sort_values('tier_order').reset_index(drop=True)
+        out['risk_tier_feature_gradient'] = gradient
+        long = gradient.melt(
+            id_vars=['risk_tier', 'tier_order', 'sample_count'] + (['confirmed_rate'] if 'confirmed_rate' in gradient.columns else []),
+            value_vars=[c for c in gradient.columns if c not in {'risk_tier', 'tier_order', 'sample_count', 'confirmed_rate'}],
+            var_name='feature',
+            value_name='mean_value',
+        )
+        long['normalized_mean'] = long.groupby('feature')['mean_value'].transform(
+            lambda s: (s - s.min()) / (s.max() - s.min() + 1e-9)
+        )
+        out['risk_tier_feature_gradient_long'] = long
+    return out
+
+
 def summarize_budget_evidence(pareto_frontier: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     if pareto_frontier.empty:
         return pd.DataFrame(), {}
@@ -399,6 +674,147 @@ def summarize_primary_plan_feasibility(plans: pd.DataFrame) -> pd.DataFrame:
     )
     summary['feasible_share'] = summary['feasible_count'] / summary['total_samples'].clip(lower=1)
     return summary.sort_values(group_cols).reset_index(drop=True)
+
+
+def _activity_bin_label(value: float) -> str:
+    v = float(value)
+    if v < 40:
+        return 'activity_lt40'
+    if v < 60:
+        return 'activity_40_60'
+    return 'activity_ge60'
+
+
+def _tanshi_band_label(value: float) -> str:
+    v = float(value)
+    if v <= 58:
+        return 'tanshi_le58'
+    if v <= 61:
+        return 'tanshi_59_61'
+    return 'tanshi_ge62'
+
+
+def _allowed_intensity_levels(age_group: int, activity_total: float, clinical_rules: dict[str, Any]) -> list[int]:
+    age_levels = set(int(x) for x in clinical_rules['activity_rules']['age_to_intensity'].get(int(age_group), []))
+    score_levels = set()
+    for spec in clinical_rules['activity_rules']['score_to_intensity'].values():
+        min_score = float(spec.get('min_score', -np.inf))
+        max_score = float(spec.get('max_score', np.inf))
+        if min_score <= float(activity_total) <= max_score:
+            score_levels = set(int(x) for x in spec.get('allowed', []))
+            break
+    allowed = sorted(age_levels.intersection(score_levels) if score_levels else age_levels)
+    return allowed
+
+
+def _allowed_tcm_levels(tanshi: float, clinical_rules: dict[str, Any]) -> list[int]:
+    levels = []
+    for spec in clinical_rules['tcm']['tcm_allowed_levels_by_tanshi']:
+        if float(tanshi) <= float(spec.get('max_tanshi', 0)):
+            levels = [int(x) for x in spec.get('levels', [])]
+            break
+    return levels
+
+
+def build_optimization_mechanism_outputs(
+    df: pd.DataFrame,
+    plans: pd.DataFrame,
+    plans_budget_grid: pd.DataFrame,
+    config: dict[str, Any],
+) -> dict[str, pd.DataFrame]:
+    out: dict[str, pd.DataFrame] = {
+        'optimization_constraint_profile': pd.DataFrame(),
+        'optimization_driver_summary': pd.DataFrame(),
+        'optimization_budget_strategy_shift': pd.DataFrame(),
+        'optimization_sample_explanations': pd.DataFrame(),
+    }
+    phlegm = phlegm_intervention_cohort(df)
+    if phlegm.empty:
+        return out
+    clinical_rules = config['clinical_rules']
+    intervention_cfg = config['intervention']
+    records = []
+    for _, row in phlegm.iterrows():
+        age_group = int(pd.to_numeric(row.get('age_group', 1), errors='coerce'))
+        activity_total = float(pd.to_numeric(row.get('activity_total', 0.0), errors='coerce'))
+        tanshi = float(pd.to_numeric(row.get('constitution_tanshi', 0.0), errors='coerce'))
+        allowed_intensity = _allowed_intensity_levels(age_group, activity_total, clinical_rules)
+        allowed_tcm = _allowed_tcm_levels(tanshi, clinical_rules)
+        records.append(
+            {
+                'sample_id': int(row['sample_id']),
+                'risk_tier': row.get('risk_tier'),
+                'age_group': age_group,
+                'activity_total': activity_total,
+                'activity_bin': _activity_bin_label(activity_total),
+                'constitution_tanshi': tanshi,
+                'tanshi_band': _tanshi_band_label(tanshi),
+                'allowed_intensity_levels': ','.join(str(x) for x in allowed_intensity),
+                'allowed_intensity_count': int(len(allowed_intensity)),
+                'allowed_tcm_levels': ','.join(str(x) for x in allowed_tcm),
+                'allowed_tcm_count': int(len(allowed_tcm)),
+                'tolerance_capacity': float(tolerance_capacity(activity_total, age_group, intervention_cfg['tolerance'])),
+            }
+        )
+    constraint_profile = pd.DataFrame(records)
+    out['optimization_constraint_profile'] = constraint_profile
+
+    if not plans.empty:
+        merged = constraint_profile.merge(
+            plans[
+                [
+                    'sample_id',
+                    'status',
+                    'plan',
+                    'first_stage_tcm',
+                    'first_stage_intensity',
+                    'first_stage_frequency',
+                    'total_cost',
+                    'total_burden',
+                    'final_tanshi_score',
+                    'final_latent_state',
+                ]
+            ],
+            on='sample_id',
+            how='left',
+        )
+        driver_summary = merged.groupby(['risk_tier', 'age_group', 'activity_bin'], as_index=False).agg(
+            sample_count=('sample_id', 'count'),
+            feasible_count=('status', lambda s: int((pd.Series(s) == 'ok').sum())),
+            mean_allowed_intensity_count=('allowed_intensity_count', 'mean'),
+            mean_allowed_tcm_count=('allowed_tcm_count', 'mean'),
+            mean_tolerance_capacity=('tolerance_capacity', 'mean'),
+            first_stage_tcm_mode=('first_stage_tcm', lambda s: _mode_from_series(s)),
+            first_stage_intensity_mode=('first_stage_intensity', lambda s: _mode_from_series(s)),
+            first_stage_frequency_mode=('first_stage_frequency', lambda s: _mode_from_series(s)),
+            mean_total_cost=('total_cost', 'mean'),
+            mean_total_burden=('total_burden', 'mean'),
+            mean_final_tanshi=('final_tanshi_score', 'mean'),
+        )
+        driver_summary['feasible_share'] = driver_summary['feasible_count'] / driver_summary['sample_count'].clip(lower=1)
+        out['optimization_driver_summary'] = driver_summary
+        out['optimization_sample_explanations'] = merged[merged['sample_id'].isin([1, 2, 3])].reset_index(drop=True)
+
+    if not plans_budget_grid.empty:
+        budget_shift = plans_budget_grid[plans_budget_grid['status'] == 'ok'].groupby('budget_cap', as_index=False).agg(
+            sample_count=('sample_id', 'count'),
+            first_stage_tcm_mean=('first_stage_tcm', 'mean'),
+            first_stage_intensity_mean=('first_stage_intensity', 'mean'),
+            first_stage_frequency_mean=('first_stage_frequency', 'mean'),
+            mean_total_cost=('total_cost', 'mean'),
+            mean_total_burden=('total_burden', 'mean'),
+            mean_final_tanshi=('final_tanshi_score', 'mean'),
+            mean_final_latent=('final_latent_state', 'mean'),
+        )
+        out['optimization_budget_strategy_shift'] = budget_shift
+    return out
+
+
+def _mode_from_series(series: pd.Series) -> float:
+    cleaned = pd.to_numeric(series, errors='coerce').dropna()
+    if cleaned.empty:
+        return float('nan')
+    return float(cleaned.mode().iloc[0])
 
 
 def _enumerate_heuristic_baselines_for_row(

@@ -565,6 +565,93 @@ R_i=100\hat p_i
 
 > 代谢偏离信息是问题二风险识别的核心支撑模块；体质信息也有稳定增益；活动与背景信息更多起到边际修正和分层细化作用。
 
+### 6.11 问题一到问题二的桥梁证据
+
+为了避免“问题一做潜结构、问题二又另起炉灶”的印象，当前验证层又补了四组桥梁证据：
+
+- `validation/problem_bridge_view_semantics.csv`
+- `validation/problem_bridge_role_map.csv`
+- `validation/problem_bridge_scalar_ranking_utility.csv`
+- `validation/problem_bridge_latent_risk_bridge.csv`
+
+其中最重要的是 `problem_bridge_role_map.csv`。  
+它明确给出：
+
+1. `constitution_factor` 与 `activity_factor` 直接进入问题二主模型；
+2. `metabolic_factor` 与 `latent_state_h` 不直接进入严格主模型，而主要承担结构解释和风险梯度验证角色；
+3. 真正进入问题二的，是拆回前置层面的 `metabolic_deviation_total`、`constitution_tanshi` 等变量。
+
+这意味着论文里应写成：
+
+> 问题一的作用不是直接把二阶潜状态当作唯一预测器，而是先识别结构，再将其中可前瞻使用的结构因子和原始前置偏离特征分流进入问题二：部分变量进入主模型承担预警功能，部分变量保留为风险层级的解释与验证依据。
+
+当前 `problem_bridge_scalar_ranking_utility.csv` 还给出一个关键事实：
+
+1. 单独看标量预警效用时，`metabolic_factor` 的诊断区分能力最强，`AUC≈0.7599`；
+2. `latent_state_h` 的 `AUC≈0.6277`，明显低于 `metabolic_factor`；
+3. 这说明二阶综合潜状态更适合做整体结构排序和解释，而不应被夸写成问题二唯一核心监督量。
+
+这正是国奖答卷里更稳的说法：
+
+> 二阶综合潜状态用于刻画总体结构严重程度，并辅助解释风险梯度；真正承担严格预警任务的，是不含诊断泄露的前置风险特征集合。
+
+### 6.12 二阶一维综合应如何表述
+
+当前还补了：
+
+- `validation/problem_bridge_second_order_dimensionality.csv`
+- `validation/problem_bridge_summary.json`
+
+本轮结果显示：
+
+1. 三个一阶因子做二阶 PCA 时，第一主成分解释率约为 `0.3394`；
+2. 若要达到累计 `80%` 方差解释，需要三维全部保留。
+
+因此这里不宜把 `latent_state_h` 写成“强一维真实潜变量”。  
+更稳妥的表述是：
+
+> 我们采用一维二阶综合指数 `latent_state_h` 作为便于排序、分层和解释的结构汇总量，而不是宣称三视角结构天然收缩为单一潜因子。其合理性来自于：一方面它在 bootstrap 条件下具有较好的稳定性，另一方面它与问题二风险输出存在稳定相关，因此可作为统一的结构解释坐标。
+
+### 6.13 三级风险阈值的答卷级证据
+
+为了让三级风险阈值从“给出结果”升级为“给出可信依据”，当前又输出了：
+
+- `validation/risk_threshold_selected_row.csv`
+- `validation/risk_threshold_bootstrap_intervals.csv`
+- `validation/risk_threshold_alignment.csv`
+- `validation/risk_tier_feature_gradient.csv`
+- `validation/risk_tier_feature_gradient.png`
+
+本轮结果中：
+
+1. `t1` bootstrap 均值约为 `60.80`；
+2. `t2` bootstrap 均值约为 `89.54`；
+3. 低锚点落入低风险组比例约 `0.607`；
+4. 高锚点落入高风险组比例约 `0.845`；
+5. 高风险组确诊率约 `0.964`，明显高于低风险组的 `0.348`。
+
+因此正文里完全可以加强写成：
+
+> 本文的三级风险阈值并非按分位数机械切分，而是通过锚点识别、严重度分离、组间离散度和平衡性共同搜索得到，并经 bootstrap 验证具有稳定范围。分层结果在确诊率、潜状态和代谢偏离等关键指标上均表现出清晰梯度，说明该分层不仅存在统计意义，也具有医学解释性。
+
+### 6.14 防泄露设计应上升为贡献
+
+当前验证层已经把“严格前置预警模型”与“宽松含血脂模型”做成独立对照：
+
+- `validation/risk_leakage_benchmark.csv`
+- `validation/risk_leakage_significance.csv`
+
+本轮结果非常适合写成答卷亮点：
+
+1. 严格模型 `AUC=0.9219`；
+2. 宽松含血脂模型在锚定训练口径下看似几乎完美；
+3. 但在全样本真实诊断口径下，其 `AUC=0.8870`，反而低于严格模型；
+4. 对应显著性比较显示，宽松模型并没有带来更可信的外部区分能力。
+
+因此这一部分不应只写成“实现细节”，而应上升为：
+
+> 本文特别区分了诊断信息与预警信息，显式避免将 TC/TG/LDL-C/HDL-C 及其派生诊断依据直接注入预警模型。实验表明，虽然含诊断信息的宽松模型在训练锚点口径下看起来更强，但在全样本真实诊断口径下并不更优，因此严格前置预警设计不仅更符合题意，也更具有可信性和可迁移性。
+
 需要谨慎的内容：
 
 1. 不宜宣称规则集已经穷尽所有临床模式；
@@ -774,6 +861,35 @@ months \cdot \max(f-5,0)\cdot 0.01
 
 > 当前两类启发式基线在本轮结果中数值重合，说明在现有规则与预算约束下，最低成本路径同时也是最低负担路径；这不是结果异常，而是可行域结构本身导致的退化重合。
 
+### 7.8 问题三的个体化机制拆解
+
+为了把问题三从“会求解”提升到“机制很清楚”，当前又补了：
+
+- `validation/optimization_constraint_profile.csv`
+- `validation/optimization_driver_summary.csv`
+- `validation/optimization_budget_strategy_shift.csv`
+- `validation/optimization_sample_explanations.csv`
+- `validation/optimization_strategy_heatmap.png`
+- `validation/sample_1_2_3_plan_paths.png`
+
+这些结果让我们可以把问题三写得更像“分配机制”而不是“黑箱输出”：
+
+1. 年龄组越高，允许强度集合越窄；
+2. `activity_total` 越低，允许的活动强度等级越少；
+3. 痰湿积分越高，可选调理等级越高；
+4. 耐受度上限越低，可行解越容易消失；
+5. 预算上升会优先推高首阶段频次和部分人群的首阶段强度，而不是平均给所有患者同样加码。
+
+例如 `optimization_driver_summary.csv` 已显示：
+
+1. 高风险、低活动、年龄 4-5 组的可行率明显下降，部分组合为 `0`；
+2. 低年龄且活动能力较好的组，更容易得到较高频次和较积极的首阶段方案；
+3. 这说明最优方案差异确实是由年龄、活动能力、痰湿积分和耐受度共同驱动的。
+
+因此正文里可以更有力地写成：
+
+> 问题三并非单纯输出若干优化结果，而是形成了“年龄约束强度上限、活动能力约束训练负担、痰湿积分决定调理等级、预算决定频次提升空间”的个体化干预分配机制。不同患者最优方案的差异，来源于规则可行域和资源约束的系统性变化，而非黑箱随机波动。
+
 ---
 
 ## 8. 三个问题之间的逻辑关联
@@ -844,9 +960,9 @@ months \cdot \max(f-5,0)\cdot 0.01
 如果正文每章都要挂钩到结果文件，建议如下：
 
 - 问题一：优先引用 `latent/` 目录结果；
-- 问题二：优先引用 `risk/`、`rules/`、`validation/risk_evidence_summary.json`、`validation/risk_model_ablation.csv`、`validation/risk_model_significance.csv`；
-- 问题三：优先引用 `optimization/`、`validation/optimization_robustness.csv`、`validation/optimization_baseline_summary.csv`、`validation/optimization_significance.csv`；
-- 总结与答辩：优先引用 `validation/diagnostics.json`、`validation/risk_model_benchmark.csv` 与 `validation/optimization_baseline_summary.csv`。
+- 问题二：优先引用 `risk/`、`rules/`、`validation/risk_evidence_summary.json`、`validation/problem_bridge_role_map.csv`、`validation/risk_threshold_bootstrap_intervals.csv`、`validation/risk_model_ablation.csv`、`validation/risk_model_significance.csv`、`validation/risk_leakage_benchmark.csv`；
+- 问题三：优先引用 `optimization/`、`validation/optimization_robustness.csv`、`validation/optimization_baseline_summary.csv`、`validation/optimization_significance.csv`、`validation/optimization_driver_summary.csv`、`validation/optimization_sample_explanations.csv`；
+- 总结与答辩：优先引用 `validation/diagnostics.json`、`validation/workflow_overview.png`、`validation/risk_model_benchmark.csv`、`validation/risk_leakage_benchmark.csv` 与 `validation/optimization_baseline_summary.csv`。
 
 ---
 

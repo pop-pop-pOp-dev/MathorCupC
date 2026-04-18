@@ -83,7 +83,9 @@ def _resolve_threshold_section(risk_config: dict) -> dict:
     return risk_config.get('thresholds', {})
 
 
-def _drop_forbidden_diagnostic_features(x: pd.DataFrame) -> pd.DataFrame:
+def _drop_forbidden_diagnostic_features(x: pd.DataFrame, allow_diagnostic_features: bool = False) -> pd.DataFrame:
+    if allow_diagnostic_features:
+        return x.copy()
     keep_cols = [
         col for col in x.columns
         if col not in FORBIDDEN_DIAGNOSTIC_FEATURES and not col.startswith(('score_tc', 'score_tg', 'score_ldl', 'score_hdl'))
@@ -281,9 +283,18 @@ def fit_severity_ridge_model(df: pd.DataFrame, risk_config: dict, seed: int = 20
     )
 
 
-def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) -> RiskModelArtifacts:
+def fit_anchor_front_model(
+    df: pd.DataFrame,
+    risk_config: dict,
+    seed: int = 20260417,
+    *,
+    allow_diagnostic_features: bool = False,
+) -> RiskModelArtifacts:
     risk_section = _resolve_risk_section(risk_config)
-    x = _drop_forbidden_diagnostic_features(build_risk_feature_matrix(df, risk_config))
+    x = _drop_forbidden_diagnostic_features(
+        build_risk_feature_matrix(df, risk_config, allow_diagnostic_features=allow_diagnostic_features),
+        allow_diagnostic_features=allow_diagnostic_features,
+    )
     anchors = build_diagnosis_anchor_flags(df)
     train_mask = (anchors['low_anchor'] == 1) | (anchors['high_anchor'] == 1)
     y = (anchors.loc[train_mask, 'high_anchor'] == 1).astype(int)
@@ -355,7 +366,7 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
     ).sort_values('abs_standardized_weight', ascending=False).reset_index(drop=True)
 
     metadata = {
-        'model_type': 'anchor_front_logistic',
+        'model_type': 'diagnostic_wide_logistic' if allow_diagnostic_features else 'anchor_front_logistic',
         'penalty': penalty,
         'best_c': best_c,
         'cv_folds': cv_folds,
@@ -366,6 +377,7 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
         'low_anchor_count': int(anchors['low_anchor'].sum()),
         'probability_calibration': chosen_calibration,
         'calibration_selection_metric': calibration_selection_metric,
+        'risk_input_policy': 'wide_with_diagnostics' if allow_diagnostic_features else 'strict_prediagnostic_only',
     }
     return RiskModelArtifacts(
         score_frame=score_frame,
@@ -425,17 +437,17 @@ def _coerce_class_weight(value: Any) -> ClassWeightType:
     return 'balanced'
 
 
-def build_risk_feature_matrix(df: pd.DataFrame, risk_config: dict) -> pd.DataFrame:
+def build_risk_feature_matrix(df: pd.DataFrame, risk_config: dict, allow_diagnostic_features: bool = False) -> pd.DataFrame:
     risk_section = _resolve_risk_section(risk_config)
     feature_cfg = risk_section.get('features', {})
     base_features = feature_cfg.get('base', DEFAULT_BASE_FEATURES)
     interaction_spec = _coerce_interaction_spec(feature_cfg.get('interactions', DEFAULT_INTERACTIONS))
     out = pd.DataFrame(index=df.index)
     for feature in base_features:
-        if feature in df.columns and feature not in FORBIDDEN_DIAGNOSTIC_FEATURES:
+        if feature in df.columns and (allow_diagnostic_features or feature not in FORBIDDEN_DIAGNOSTIC_FEATURES):
             out[str(feature)] = pd.to_numeric(df[feature], errors='coerce').fillna(0.0)
     for name, terms in interaction_spec.items():
-        if name in FORBIDDEN_DIAGNOSTIC_FEATURES or any(term in FORBIDDEN_DIAGNOSTIC_FEATURES for term in terms):
+        if (not allow_diagnostic_features) and (name in FORBIDDEN_DIAGNOSTIC_FEATURES or any(term in FORBIDDEN_DIAGNOSTIC_FEATURES for term in terms)):
             continue
         if name in df.columns:
             out[name] = pd.to_numeric(df[name], errors='coerce').fillna(0.0)
@@ -635,6 +647,9 @@ def fit_risk_model(df: pd.DataFrame, risk_config: dict, seed: int = 20260417) ->
 
     if model_type in {'anchor_front_logistic', 'front_anchor_logit', 'prediagnostic_anchor_logit'}:
         return fit_anchor_front_model(df, risk_config, seed=seed)
+
+    if model_type in {'diagnostic_wide_logistic', 'anchor_front_logistic_wide', 'leaky_anchor_logistic'}:
+        return fit_anchor_front_model(df, risk_config, seed=seed, allow_diagnostic_features=True)
 
     if model_type in {'severity_ridge', 'ridge_severity', 'continuous_ridge'}:
         return fit_severity_ridge_model(df, risk_config, seed=seed)

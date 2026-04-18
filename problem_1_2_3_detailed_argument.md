@@ -291,6 +291,95 @@
 
 > 与旧版手工加权和连续严重度 Ridge 基线相比，当前主模型在区分能力、概率质量和锚点分离上均表现出稳定优势；消融实验进一步说明，代谢偏离模块是风险识别的核心支撑，体质模块提供了稳定增益，说明当前风险模型确实捕捉到了具有结构意义的风险规律，而不是单纯依赖某次抽样偶然得到的结果。
 
+#### 第七步：补上“问题一 -> 问题二”的桥梁证据
+
+为了防止答辩时被问到“问题一和问题二是不是两套彼此独立的分析”，当前验证层又增加了：
+
+- `validation/problem_bridge_view_semantics.csv`
+- `validation/problem_bridge_role_map.csv`
+- `validation/problem_bridge_scalar_ranking_utility.csv`
+- `validation/problem_bridge_latent_risk_bridge.csv`
+- `validation/problem_bridge_second_order_dimensionality.csv`
+
+这些文件共同回答了三个关键问题：
+
+1. 三个视角各自代表什么医学含义；
+2. 为什么二阶综合可以作为结构解释坐标；
+3. 为什么问题一产出中，只有一部分变量进入问题二主模型，另一部分只承担解释角色。
+
+本轮结果中，`problem_bridge_role_map.csv` 明确显示：
+
+1. `constitution_factor`、`activity_factor` 直接进入问题二主模型；
+2. `metabolic_factor`、`latent_state_h` 不直接进入严格主模型；
+3. 代谢视角会拆回前置层面的 `metabolic_deviation_total` 等变量进入问题二。
+
+这意味着问题一并不是“做完就丢”，而是：
+
+> 先在问题一中识别结构，再在问题二中把其中能够前瞻使用的结构因子与原始前置偏离特征组合起来做风险预警；而综合潜状态 `latent_state_h` 则主要承担风险梯度解释与结构验证功能。
+
+同时，`problem_bridge_scalar_ranking_utility.csv` 还给出：
+
+1. `metabolic_factor` 单独作为标量时的预警效用最强，`AUC≈0.7599`；
+2. `latent_state_h` 的 `AUC≈0.6277`；
+3. 因此二阶综合潜状态更适合写成“结构排序与解释指数”，而不是“唯一核心监督量”。
+
+#### 第八步：说明为什么二阶综合只保留一维
+
+这个问题最容易被追问。  
+当前 `problem_bridge_second_order_dimensionality.csv` 显示：
+
+1. 二阶 PCA 的第一主成分解释率约为 `0.3394`；
+2. 若要累计达到 `80%` 方差解释，需要三个主成分全部保留。
+
+所以在正文中最稳妥的写法不是：
+
+> 三视角天然收缩为一个强一维真实潜变量。
+
+而应该写成：
+
+> 我们采用一维二阶综合指数 `latent_state_h` 作为统一的排序和解释坐标，用于连接问题一结构表征、问题二风险梯度与问题三个体方案解释；其作用是“汇总结构信息”，而非宣称存在唯一真实潜因子。
+
+#### 第九步：把阈值依据做成可答辩证据
+
+当前关于三级风险阈值又新增了：
+
+- `validation/risk_threshold_selected_row.csv`
+- `validation/risk_threshold_bootstrap_intervals.csv`
+- `validation/risk_threshold_alignment.csv`
+- `validation/risk_tier_feature_gradient.csv`
+- `validation/risk_tier_feature_gradient.png`
+
+本轮结果中：
+
+1. `t1` bootstrap 均值约 `60.80`；
+2. `t2` bootstrap 均值约 `89.54`；
+3. 低锚点落入低风险组比例约 `0.607`；
+4. 高锚点落入高风险组比例约 `0.845`；
+5. 高风险组确诊率约 `0.964`，而低风险组约 `0.348`。
+
+这说明三级风险不是机械切分，而是：
+
+> 在锚点分离、严重度梯度、组间差异和平衡性约束下共同搜索得到，并经过 bootstrap 验证具有稳定区间；分层结果在代谢偏离、潜状态和确诊率上确实形成了显著梯度。
+
+#### 第十步：把防泄露设计写成贡献而不是细节
+
+当前还新增了：
+
+- `validation/risk_leakage_benchmark.csv`
+- `validation/risk_leakage_significance.csv`
+
+这组结果对答辩非常关键。  
+本轮数据显示：
+
+1. 严格前置预警模型 `AUC=0.9219`；
+2. 宽松含血脂模型虽然在训练锚点口径下看起来几乎完美；
+3. 但在全样本真实诊断口径下，其 `AUC=0.8870`，反而低于严格模型；
+4. 显著性检验也表明，宽松模型并没有带来更可信的外部优势。
+
+因此问题 2 里可以很有力地写：
+
+> 本文主动区分“诊断信息”和“预警信息”，避免将已经属于确诊依据的血脂诊断变量直接注入预警模型。实验表明，这种严格口径并不是保守退让，而是在更符合题意的同时获得了更稳健的风险预警表现。
+
 ### 3.5 当前问题 2 的正式答案可如何表述
 
 推荐正文表述：
@@ -370,6 +459,13 @@
 - [`outputs/run_20260417_211020/validation/optimization_baseline_patient_level.csv`](outputs/run_20260417_211020/validation/optimization_baseline_patient_level.csv)
 - [`outputs/run_20260417_211020/validation/optimization_baseline_summary.csv`](outputs/run_20260417_211020/validation/optimization_baseline_summary.csv)
 - [`outputs/run_20260417_211020/validation/optimization_significance.csv`](outputs/run_20260417_211020/validation/optimization_significance.csv)
+
+#### 机制拆解结果
+
+- [`outputs/run_20260417_211020/validation/optimization_constraint_profile.csv`](outputs/run_20260417_211020/validation/optimization_constraint_profile.csv)
+- [`outputs/run_20260417_211020/validation/optimization_driver_summary.csv`](outputs/run_20260417_211020/validation/optimization_driver_summary.csv)
+- [`outputs/run_20260417_211020/validation/optimization_budget_strategy_shift.csv`](outputs/run_20260417_211020/validation/optimization_budget_strategy_shift.csv)
+- [`outputs/run_20260417_211020/validation/optimization_sample_explanations.csv`](outputs/run_20260417_211020/validation/optimization_sample_explanations.csv)
 
 ### 4.4 我们是如何得到这个答案的
 
@@ -483,6 +579,44 @@
 
 > 在相同题面规则下，优化方案确实能显著改善结局，但需要更高成本和更高干预负担，因此它解决的是效果-成本-负担之间的权衡最优问题。
 
+#### 第八步：把个体化机制拆开讲清楚
+
+如果只给结果表，评委仍可能追问：
+
+> “为什么这类患者适合这个方案？”
+
+因此当前又补了约束画像和机制拆解结果：
+
+- `validation/optimization_constraint_profile.csv`
+- `validation/optimization_driver_summary.csv`
+- `validation/optimization_budget_strategy_shift.csv`
+- `validation/optimization_sample_explanations.csv`
+
+这些结果让问题 3 的解释链条更完整：
+
+1. 年龄组越高，允许强度集合越窄；
+2. `activity_total` 越低，可选强度等级越少；
+3. 痰湿积分越高，可选调理等级越高；
+4. 耐受度上限越低，可行率越容易下降；
+5. 预算提升优先体现在首阶段频次和部分人群的首阶段强度提升上。
+
+例如当前 `optimization_driver_summary.csv` 已经显示：
+
+1. 高风险、低活动、年龄 4-5 组的可行率显著下降，部分组合甚至为 `0`；
+2. 年轻且活动能力较好的组，更容易获得高频次、中高强度方案；
+3. 这说明问题 3 的最优结果并非黑箱拍出，而是由年龄、活动能力、痰湿积分和耐受度共同驱动。
+
+同时，`optimization_sample_explanations.csv` 也把样本 `1/2/3` 的约束与方案并列放出。  
+例如：
+
+1. 样本 1 属于 `activity_lt40`，允许强度仅有 `1` 级，因此最终方案走向“高调理 + 低强度 + 中频次”；
+2. 样本 2 活动总分更高，但痰湿积分仅 `58`，所以只允许 `1` 级调理，更适合“低调理 + 中强度 + 高频次”；
+3. 样本 3 活动能力最好、耐受度最高，且痰湿积分处于 `59-61` 带，因此可以进入更积极的中高强度路径。
+
+这使得问题 3 不再只是“优化器给答案”，而是：
+
+> 年龄约束强度上限、活动能力约束训练负担、痰湿积分决定调理等级、预算决定频次提升空间，从而共同形成个体化最优方案。
+
 ### 4.5 当前问题 3 的正式答案可如何表述
 
 推荐正文表述：
@@ -540,9 +674,9 @@
 
 结合当前代码和结果，可做如下判断：
 
-1. 问题 1：结构上已经完整，结论表达需稍谨慎；
-2. 问题 2：当前是最成熟的一问，预测、校准、基线对照与消融证据都较强；
-3. 问题 3：方案、预算前沿和基线显著性都已补齐，但需主动解释无可行解样本及效果-成本权衡。
+1. 问题 1：结构上已经完整，并已补到问题二的桥梁证据，但二阶一维表述仍应保持克制；
+2. 问题 2：当前是最成熟的一问，预测、校准、桥梁、阈值、防泄露、基线对照与消融证据都较强；
+3. 问题 3：方案、预算前沿、基线显著性和机制拆解都已补齐，但仍需主动解释无可行解样本及效果-成本权衡。
 
 ---
 

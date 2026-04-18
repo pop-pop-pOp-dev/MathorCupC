@@ -280,15 +280,35 @@
 | [`outputs/run_20260417_211020/validation/risk_model_benchmark.csv`](outputs/run_20260417_211020/validation/risk_model_benchmark.csv) | 表格 | `run_stage_06_validate()` | 主模型、旧版手工加权、Ridge 基线对照 | 本轮主模型明显优于两类基线 | 支撑“我们的方法优于旧口径/弱基线” |
 | [`outputs/run_20260417_211020/validation/risk_model_ablation.csv`](outputs/run_20260417_211020/validation/risk_model_ablation.csv) | 表格 | `run_stage_06_validate()` | 风险模型消融实验 | 完整主模型与“去体质/去活动/去代谢/去背景/去交互项”逐项对照；其中去代谢信息后 AUC 由 0.9219 大幅降至 0.5997 | 支撑“问题二不是拍脑袋拼特征，而是存在关键模块贡献差异” |
 | [`outputs/run_20260417_211020/validation/risk_model_significance.csv`](outputs/run_20260417_211020/validation/risk_model_significance.csv) | 表格 | `run_stage_06_validate()` | 风险模型基线/消融的显著性检验 | 对旧版手工加权、Ridge 及各消融版本做配对 bootstrap；主模型相对两类基线在 AUC、PR-AUC、Brier、LogLoss 上均显著更优 | 支撑“问题二优势不是单次偶然” |
+| [`outputs/run_20260417_211020/validation/risk_leakage_benchmark.csv`](outputs/run_20260417_211020/validation/risk_leakage_benchmark.csv) | 表格 | `run_stage_06_validate()` | 严格预警与宽松含血脂模型对照 | 宽松模型在锚定训练口径下看起来更强，但在全样本真实诊断口径下 `AUC=0.8870`，反而低于严格模型的 `0.9219` | 支撑“防泄露设计不是保守损失，而是更符合题意且更稳健” |
+| [`outputs/run_20260417_211020/validation/risk_leakage_significance.csv`](outputs/run_20260417_211020/validation/risk_leakage_significance.csv) | 表格 | `run_stage_06_validate()` | 宽松/严格模型的显著性比较 | 宽松含血脂模型相对严格模型在 `AUC` 上出现显著退化，说明“看起来更准”的宽松口径并不公平也不更稳 | 支撑“主动防泄露是可信预警贡献之一” |
+| [`outputs/run_20260417_211020/validation/problem_bridge_view_semantics.csv`](outputs/run_20260417_211020/validation/problem_bridge_view_semantics.csv) | 表格 | `run_stage_06_validate()` | 问题一三视角的医学语义说明 | 将体质、功能状态、代谢偏离三视角逐一对应到问题二中的角色分工 | 支撑“问题一不是孤立分析，而是问题二的结构前导” |
+| [`outputs/run_20260417_211020/validation/problem_bridge_role_map.csv`](outputs/run_20260417_211020/validation/problem_bridge_role_map.csv) | 表格 | `run_stage_06_validate()` | 问题一结果在问题二中的去向映射 | 明确 `constitution_factor`、`activity_factor` 直接进主模型，而 `latent_state_h`、`metabolic_factor` 主要承担解释和验证角色 | 支撑“问题一到问题二的学术闭环感” |
+| [`outputs/run_20260417_211020/validation/problem_bridge_scalar_ranking_utility.csv`](outputs/run_20260417_211020/validation/problem_bridge_scalar_ranking_utility.csv) | 表格 | `run_stage_06_validate()` | 单一结构标量的预警效用比较 | 本轮 `metabolic_factor` 单独预警效用最强，`latent_state_h` 更适合作为综合结构解释指标 | 支撑“为何二阶综合潜状态不必直接充当问题二唯一监督核心” |
+| [`outputs/run_20260417_211020/validation/problem_bridge_second_order_dimensionality.csv`](outputs/run_20260417_211020/validation/problem_bridge_second_order_dimensionality.csv) | 表格 | `run_stage_06_validate()` | 三个一阶因子的二阶维度诊断 | 显示二阶部分不是强一维塌缩结构，因此 `latent_state_h` 更适合作为综合排序/解释指数而非唯一真实潜变量声明 | 支撑“问题一表述更稳、更符合国奖答辩口径” |
+| [`outputs/run_20260417_211020/validation/problem_bridge_heatmap.png`](outputs/run_20260417_211020/validation/problem_bridge_heatmap.png) | 图 | `run_stage_06_validate()` + `plot_problem_bridge_heatmap()` | 问题一潜结构与问题二风险输出的相关热图 | 直观看到一阶因子和二阶综合指标与风险分数、严重度、确诊标签的相关关系 | 支撑“桥梁证据图示化” |
+| [`outputs/run_20260417_211020/validation/risk_threshold_selected_row.csv`](outputs/run_20260417_211020/validation/risk_threshold_selected_row.csv) | 表格 | `run_stage_06_validate()` | 当前采用阈值组合的完整评分记录 | 给出最终 `t1/t2` 所对应的 objective、组间分离度、分组占比与单调性指标 | 支撑“阈值不是只报结果，而是可回溯到评分依据” |
+| [`outputs/run_20260417_211020/validation/risk_threshold_bootstrap_intervals.csv`](outputs/run_20260417_211020/validation/risk_threshold_bootstrap_intervals.csv) | 表格 | `run_stage_06_validate()` | 阈值 bootstrap 区间摘要 | 本轮 `t1` 均值约 `60.80`，`t2` 均值约 `89.54`，说明三级阈值有稳定范围 | 支撑“阈值稳定性说明” |
+| [`outputs/run_20260417_211020/validation/risk_threshold_alignment.csv`](outputs/run_20260417_211020/validation/risk_threshold_alignment.csv) | 表格 | `run_stage_06_validate()` | 阈值与锚点口径的一致性检查 | 当前低锚点落入低风险约 `0.607`，高锚点落入高风险约 `0.845` | 支撑“阈值与题意锚点一致，不是拍脑袋切分” |
+| [`outputs/run_20260417_211020/validation/risk_tier_feature_gradient.csv`](outputs/run_20260417_211020/validation/risk_tier_feature_gradient.csv) | 表格 | `run_stage_06_validate()` | 三级风险分层后的关键特征梯度 | 高风险组确诊率约 `0.964`，显著高于低风险组的 `0.348`，同时潜状态与代谢偏离明显抬升 | 支撑“低/中/高三级真正形成了分层” |
+| [`outputs/run_20260417_211020/validation/risk_tier_feature_gradient.png`](outputs/run_20260417_211020/validation/risk_tier_feature_gradient.png) | 图 | `run_stage_06_validate()` + `plot_tier_feature_gradient()` | 三级风险的多指标梯度图 | 将痰湿积分、活动、BMI、血糖、尿酸、代谢偏离、潜状态等做归一化梯度展示 | 支撑“答卷级三级风险可视化” |
 | [`outputs/run_20260417_211020/validation/optimization_baseline_patient_level.csv`](outputs/run_20260417_211020/validation/optimization_baseline_patient_level.csv) | 表格 | `run_stage_06_validate()` | 个体层级优化基线对照 | 将优化方案与 `min_cost_feasible`、`min_burden_feasible` 启发式基线放到同一患者层面逐一比较 | 支撑“问题三改进不是只看总体均值” |
 | [`outputs/run_20260417_211020/validation/optimization_baseline_summary.csv`](outputs/run_20260417_211020/validation/optimization_baseline_summary.csv) | 表格 | `run_stage_06_validate()` | 优化方案与启发式基线总体对照 | 主方案平均末期痰湿积分约 42.47，显著低于两类基线的 50.74，但成本和负担更高 | 支撑“问题三存在明确效果-成本权衡” |
 | [`outputs/run_20260417_211020/validation/optimization_significance.csv`](outputs/run_20260417_211020/validation/optimization_significance.csv) | 表格 | `run_stage_06_validate()` | 优化阶段显著性检验 | 对配对可行样本做 Wilcoxon 检验；主方案相对基线平均再降低痰湿积分约 8.27、降低末期潜状态约 1.76，显著性极强 | 支撑“问题三优势不是个别样本特例” |
+| [`outputs/run_20260417_211020/validation/optimization_constraint_profile.csv`](outputs/run_20260417_211020/validation/optimization_constraint_profile.csv) | 表格 | `run_stage_06_validate()` | 个体可行域约束画像 | 展示年龄、活动能力、痰湿积分如何共同决定允许强度数、允许调理等级和耐受上限 | 支撑“问题三个体化机制不是黑箱” |
+| [`outputs/run_20260417_211020/validation/optimization_driver_summary.csv`](outputs/run_20260417_211020/validation/optimization_driver_summary.csv) | 表格 | `run_stage_06_validate()` | 患者特征到首阶段方案的驱动总结 | 可直接看到 `risk_tier + age_group + activity_bin` 如何改变首阶段强度、频次、成本与可行率 | 支撑“患者特征—最优方案匹配规律” |
+| [`outputs/run_20260417_211020/validation/optimization_budget_strategy_shift.csv`](outputs/run_20260417_211020/validation/optimization_budget_strategy_shift.csv) | 表格 | `run_stage_06_validate()` | 不同预算下方案形态如何变化 | 将预算变化与首阶段频次/强度、末期痰湿积分联动呈现 | 支撑“预算如何改变最优方案组合” |
+| [`outputs/run_20260417_211020/validation/optimization_sample_explanations.csv`](outputs/run_20260417_211020/validation/optimization_sample_explanations.csv) | 表格 | `run_stage_06_validate()` | 样本 1/2/3 的约束与方案解释表 | 把三位指定样本的年龄、活动能力、痰湿带、允许强度与最终方案放在一起 | 支撑“题面样本方案解释性” |
+| [`outputs/run_20260417_211020/validation/optimization_strategy_heatmap.png`](outputs/run_20260417_211020/validation/optimization_strategy_heatmap.png) | 图 | `run_stage_06_validate()` + `plot_strategy_mapping_heatmap()` | 患者特征到首阶段强度的热图 | 让“患者特征—最优方案”从表格变成评委一眼能看懂的图 | 支撑“问题三主叙事图” |
+| [`outputs/run_20260417_211020/validation/optimization_budget_shift.png`](outputs/run_20260417_211020/validation/optimization_budget_shift.png) | 图 | `run_stage_06_validate()` + `plot_optimization_budget_shift()` | 预算变化下效果与策略同步变化图 | 同时展示预算提升带来的末期痰湿改善和首阶段频次变化 | 支撑“预算—效果—强度三者联动” |
+| [`outputs/run_20260417_211020/validation/sample_1_2_3_plan_paths.png`](outputs/run_20260417_211020/validation/sample_1_2_3_plan_paths.png) | 图 | `run_stage_06_validate()` + `plot_sample_plan_paths()` | 样本 1/2/3 三阶段路径图 | 把题面指定样本的调理等级、强度、频次路径可视化 | 支撑“样本方案展示层升级” |
+| [`outputs/run_20260417_211020/validation/workflow_overview.png`](outputs/run_20260417_211020/validation/workflow_overview.png) | 图 | `run_stage_06_validate()` + `plot_workflow_overview()` | 总流程闭环图 | 将数据治理、问题一、问题二、问题三的闭环关系直接图示化 | 支撑“整篇答卷总流程图” |
 
 ### 9.2 本阶段可以支撑的主要结论
 
 1. 当前结果不是“只给结果、不做验证”，而是有完整验证层；
-2. 风险模型已有基线对照、模块消融与显著性证据；
-3. 优化阶段已有预算边际收益、启发式基线对照与配对显著性解释；
+2. 风险模型已有问题一到问题二的桥梁证据、阈值稳定性、基线对照、模块消融、显著性与防泄露对照；
+3. 优化阶段已有预算边际收益、启发式基线对照、个体化机制拆解与配对显著性解释；
 4. 这批验证文件是答辩时最重要的摘要材料。
 
 ---
@@ -304,12 +324,16 @@
 - `latent/constitution_contributions_to_latent.csv`
 - `latent/constitution_univariate_risk_association.csv`
 - `latent/latent_stability_summary.json`
+- `validation/problem_bridge_view_semantics.csv`
+- `validation/problem_bridge_role_map.csv`
+- `validation/problem_bridge_scalar_ranking_utility.csv`
 
 可支撑结论：
 
 1. 三视角潜因子可构建；
 2. 九种体质贡献存在差异；
-3. 关键指标与潜状态具有稳定性证据。
+3. 关键指标与潜状态具有稳定性证据；
+4. 问题一产出的结构变量已与问题二角色分工形成明确桥梁。
 
 ### 10.2 问题 2
 
@@ -323,6 +347,11 @@
 - `validation/risk_model_benchmark.csv`
 - `validation/risk_model_ablation.csv`
 - `validation/risk_model_significance.csv`
+- `validation/risk_leakage_benchmark.csv`
+- `validation/risk_leakage_significance.csv`
+- `validation/risk_threshold_bootstrap_intervals.csv`
+- `validation/risk_threshold_alignment.csv`
+- `validation/risk_tier_feature_gradient.csv`
 
 可支撑结论：
 
@@ -331,7 +360,9 @@
 3. 已给出核心特征组合；
 4. 主模型优于旧版手工加权与 Ridge 基线；
 5. 消融实验表明代谢偏离信息与体质信息是问题二最关键的贡献模块；
-6. 显著性检验说明上述优势不是单次抽样波动。
+6. 显著性检验说明上述优势不是单次抽样波动；
+7. 严格前置预警口径优于宽松含血脂口径，说明防泄露设计本身是优势而非妥协；
+8. 三级风险阈值具有稳定范围，并与锚点和关键特征梯度相一致。
 
 ### 10.3 问题 3
 
@@ -345,6 +376,10 @@
 - `optimization/primary_budget_feasibility_by_group.csv`
 - `validation/optimization_baseline_summary.csv`
 - `validation/optimization_significance.csv`
+- `validation/optimization_constraint_profile.csv`
+- `validation/optimization_driver_summary.csv`
+- `validation/optimization_budget_strategy_shift.csv`
+- `validation/optimization_sample_explanations.csv`
 
 可支撑结论：
 
@@ -353,7 +388,8 @@
 3. 已总结“患者特征-最优方案”规律；
 4. 已说明预算收益递减与部分高龄组无可行解现象；
 5. 已证明优化方案相对低成本/低负担启发式基线确有显著改善；
-6. 已给出效果提升伴随更高成本与负担的权衡关系。
+6. 已给出效果提升伴随更高成本与负担的权衡关系；
+7. 已把年龄、活动能力、痰湿积分和耐受度对方案选择的驱动拆解出来。
 
 ---
 
@@ -372,11 +408,16 @@
 
 1. `risk_model_benchmark.csv`
 2. `risk_evidence_summary.json`
-3. `risk_model_ablation.csv`
-4. `risk_model_significance.csv`
-5. `optimization_baseline_summary.csv`
-6. `optimization_significance.csv`
-7. `pareto_frontier_summary.csv`
-8. `sample_1_2_3_plans.csv`
-9. `strategy_mapping_by_risk_tier_age.csv`
+3. `problem_bridge_role_map.csv`
+4. `risk_threshold_bootstrap_intervals.csv`
+5. `risk_tier_feature_gradient.csv`
+6. `risk_model_ablation.csv`
+7. `risk_model_significance.csv`
+8. `risk_leakage_benchmark.csv`
+9. `optimization_driver_summary.csv`
+10. `optimization_baseline_summary.csv`
+11. `optimization_significance.csv`
+12. `pareto_frontier_summary.csv`
+13. `sample_1_2_3_plans.csv`
+14. `strategy_mapping_by_risk_tier_age.csv`
 
