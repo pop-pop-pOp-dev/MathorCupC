@@ -1,4 +1,4 @@
-# problem_1_2_3_detailed_argument
+﻿# problem_1_2_3_detailed_argument
 
 ## 1. 文档说明
 
@@ -66,9 +66,9 @@
 
 #### 图形结果
 
-- [`outputs/run_20260417_211020/latent/latent_loading_heatmap.png`](outputs/run_20260417_211020/latent/latent_loading_heatmap.png)
-- [`outputs/run_20260417_211020/latent/latent_loading_stability_forest.png`](outputs/run_20260417_211020/latent/latent_loading_stability_forest.png)
-- [`outputs/run_20260417_211020/latent/latent_score_stability_boxplot.png`](outputs/run_20260417_211020/latent/latent_score_stability_boxplot.png)
+- [`outputs/run_20260417_211020/all_figures/latent_latent_loading_heatmap.png`](outputs/run_20260417_211020/all_figures/latent_latent_loading_heatmap.png)
+- [`outputs/run_20260417_211020/all_figures/latent_latent_loading_stability_forest.png`](outputs/run_20260417_211020/all_figures/latent_latent_loading_stability_forest.png)
+- [`outputs/run_20260417_211020/all_figures/latent_latent_score_stability_boxplot.png`](outputs/run_20260417_211020/all_figures/latent_latent_score_stability_boxplot.png)
 
 ### 2.4 我们是如何得到这个答案的
 
