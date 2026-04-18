@@ -74,6 +74,8 @@ def test_anchor_flags_follow_diagnosis_logic():
 def test_anchor_front_model_runs_without_leakage_features():
     artifacts = fit_risk_model(build_df(), RISK_CONFIG, seed=7)
     assert artifacts.metadata['model_type'] == 'anchor_front_logistic'
+    assert artifacts.metadata['probability_calibration'] in {'none', 'sigmoid', 'isotonic'}
     assert 'lipid_deviation_total' not in artifacts.coefficients['feature'].tolist()
     assert 'latent_state_h' not in artifacts.coefficients['feature'].tolist()
+    assert artifacts.score_frame['risk_prob'].between(0, 1).all()
     assert artifacts.score_frame['continuous_risk_score'].between(0, 100).all()

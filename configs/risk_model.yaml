@@ -15,6 +15,8 @@ latent_state:
 risk_score:
   model_type: anchor_front_logistic
   calibration_bins: 10
+  probability_calibration: auto
+  calibration_selection_metric: brier_score
   features:
     base:
       - constitution_factor

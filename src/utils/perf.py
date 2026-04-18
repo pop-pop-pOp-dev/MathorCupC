@@ -18,6 +18,18 @@ def resolve_n_jobs(config: dict[str, Any] | None) -> int:
         return effective_n_jobs(-1)
 
 
+def resolve_milp_n_jobs(config: dict[str, Any] | None) -> int:
+    """SciPy milp 并行度：默认低于全局 n_jobs，避免多进程同时构建约束矩阵导致内存峰值叠加。"""
+    if not config:
+        return 1
+    perf = config.get('performance') or {}
+    raw = perf.get('milp_n_jobs', 1)
+    try:
+        return max(1, int(effective_n_jobs(int(raw))))
+    except (TypeError, ValueError):
+        return 1
+
+
 def fast_threshold_grid(config: dict[str, Any] | None) -> bool:
     if not config:
         return False

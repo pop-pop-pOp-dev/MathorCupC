@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, mean_absolute_error, r2_score, roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -67,6 +68,11 @@ def normalize_series(series: pd.Series) -> pd.Series:
 def _sigmoid(values: pd.Series | np.ndarray) -> pd.Series:
     arr = np.asarray(values, dtype=float)
     return pd.Series(1.0 / (1.0 + np.exp(-arr)))
+
+
+def _logit_clip(values: pd.Series | np.ndarray) -> np.ndarray:
+    arr = np.clip(np.asarray(values, dtype=float), 1e-6, 1 - 1e-6)
+    return np.log(arr / (1.0 - arr))
 
 
 def _resolve_risk_section(risk_config: dict) -> dict:
@@ -292,6 +298,8 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
     class_weight = _coerce_class_weight(risk_section.get('class_weight', 'balanced'))
     scoring = str(risk_section.get('scoring', 'roc_auc'))
     calibration_bins = int(risk_section.get('calibration_bins', 10))
+    calibration_method = str(risk_section.get('probability_calibration', 'auto')).lower()
+    calibration_selection_metric = str(risk_section.get('calibration_selection_metric', 'brier_score')).lower()
 
     best_c = _select_best_c(x_train_full, y, penalty, solver, class_weight, candidate_cs, max_iter, cv_folds, seed, scoring)
     scaler = StandardScaler().fit(x_train_full)
@@ -300,7 +308,15 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
     model = _make_logistic_model(penalty, solver, best_c, class_weight, max_iter, seed)
     model.fit(x_train_scaled, y)
 
-    cv_pred = _build_cv_predictions(x_train_full, y, penalty, solver, class_weight, best_c, max_iter, cv_folds, seed)
+    cv_pred_raw, cv_logit_raw = _build_cv_raw_predictions(x_train_full, y, penalty, solver, class_weight, best_c, max_iter, cv_folds, seed)
+    chosen_calibration, calibrator, cv_pred = _select_probability_calibration(
+        y,
+        cv_pred_raw,
+        cv_logit_raw,
+        seed,
+        calibration_method,
+        calibration_selection_metric,
+    )
     cv_metrics = _build_cv_metrics(y, cv_pred)
     calibration = _build_calibration_table(y, cv_pred, bins=calibration_bins)
 
@@ -308,7 +324,18 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
     coef = pd.Series(model.coef_[0], index=x.columns)
     score_frame = standardized.mul(coef, axis=1).rename(columns=lambda col: f'score_{col}')
     risk_logit = float(model.intercept_[0]) + score_frame.sum(axis=1)
-    risk_prob = _sigmoid(risk_logit).set_axis(df.index)
+    raw_prob_all = _sigmoid(risk_logit).set_axis(df.index)
+    raw_prob_train = _sigmoid(float(model.intercept_[0]) + standardized.loc[train_mask].mul(coef, axis=1).sum(axis=1)).set_axis(y.index)
+    if chosen_calibration == 'sigmoid':
+        final_calibrator = _fit_sigmoid_calibrator(_logit_clip(raw_prob_train), y, seed)
+    elif chosen_calibration == 'isotonic':
+        final_calibrator = _fit_isotonic_calibrator(np.asarray(raw_prob_train, dtype=float), y)
+    else:
+        final_calibrator = None
+    risk_prob = pd.Series(
+        _apply_calibrator(chosen_calibration, np.asarray(raw_prob_all, dtype=float), _logit_clip(raw_prob_all), final_calibrator),
+        index=df.index,
+    )
     score_frame['risk_logit'] = risk_logit
     score_frame['risk_prob'] = risk_prob
     score_frame['continuous_risk_score'] = risk_prob * 100
@@ -337,6 +364,8 @@ def fit_anchor_front_model(df: pd.DataFrame, risk_config: dict, seed: int = 2026
         'train_anchor_count': int(train_mask.sum()),
         'high_anchor_count': int(anchors['high_anchor'].sum()),
         'low_anchor_count': int(anchors['low_anchor'].sum()),
+        'probability_calibration': chosen_calibration,
+        'calibration_selection_metric': calibration_selection_metric,
     }
     return RiskModelArtifacts(
         score_frame=score_frame,
@@ -440,6 +469,32 @@ def _build_cv_predictions(
     return preds
 
 
+def _build_cv_raw_predictions(
+    x: pd.DataFrame,
+    y: pd.Series,
+    penalty: PenaltyType,
+    solver: SolverType,
+    class_weight: ClassWeightType,
+    best_c: float,
+    max_iter: int,
+    cv_folds: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
+    probs = np.zeros(len(x), dtype=float)
+    logits = np.zeros(len(x), dtype=float)
+    for train_idx, test_idx in splitter.split(x, y):
+        scaler = StandardScaler().fit(x.iloc[train_idx])
+        x_train = scaler.transform(x.iloc[train_idx])
+        x_test = scaler.transform(x.iloc[test_idx])
+        model = _make_logistic_model(penalty, solver, best_c, class_weight, max_iter, seed)
+        model.fit(x_train, y.iloc[train_idx])
+        fold_prob = model.predict_proba(x_test)[:, 1]
+        probs[test_idx] = fold_prob
+        logits[test_idx] = _logit_clip(fold_prob)
+    return probs, logits
+
+
 def _build_cv_metrics(y_true: pd.Series, y_prob: np.ndarray) -> pd.DataFrame:
     y_true = y_true.astype(int)
     records = [
@@ -465,6 +520,66 @@ def _build_calibration_table(y_true: pd.Series, y_prob: np.ndarray, bins: int = 
     )
     grouped['calibration_gap'] = grouped['predicted_mean'] - grouped['observed_rate']
     return grouped
+
+
+def _fit_sigmoid_calibrator(raw_logits: np.ndarray, y_true: pd.Series, seed: int) -> LogisticRegression:
+    calibrator = LogisticRegression(C=1e6, solver='lbfgs', max_iter=5000, random_state=seed)
+    calibrator.fit(raw_logits.reshape(-1, 1), y_true.astype(int).to_numpy(dtype=int))
+    return calibrator
+
+
+def _fit_isotonic_calibrator(raw_probs: np.ndarray, y_true: pd.Series) -> IsotonicRegression:
+    calibrator = IsotonicRegression(out_of_bounds='clip')
+    calibrator.fit(np.asarray(raw_probs, dtype=float), y_true.astype(int).to_numpy(dtype=int))
+    return calibrator
+
+
+def _apply_calibrator(
+    method: str,
+    raw_probs: np.ndarray,
+    raw_logits: np.ndarray,
+    calibrator: Any | None,
+) -> np.ndarray:
+    if method == 'sigmoid' and calibrator is not None:
+        return calibrator.predict_proba(np.asarray(raw_logits, dtype=float).reshape(-1, 1))[:, 1]
+    if method == 'isotonic' and calibrator is not None:
+        return np.asarray(calibrator.predict(np.asarray(raw_probs, dtype=float)), dtype=float)
+    return np.asarray(raw_probs, dtype=float)
+
+
+def _select_probability_calibration(
+    y_true: pd.Series,
+    raw_probs: np.ndarray,
+    raw_logits: np.ndarray,
+    seed: int,
+    method_pref: str,
+    metric: str,
+) -> tuple[str, Any | None, np.ndarray]:
+    method_pref = str(method_pref).lower()
+    metric = str(metric).lower()
+    candidates: list[tuple[str, Any | None, np.ndarray]] = [('none', None, np.asarray(raw_probs, dtype=float))]
+    if method_pref in {'auto', 'sigmoid'}:
+        sigmoid_cal = _fit_sigmoid_calibrator(raw_logits, y_true, seed)
+        sigmoid_pred = _apply_calibrator('sigmoid', raw_probs, raw_logits, sigmoid_cal)
+        candidates.append(('sigmoid', sigmoid_cal, sigmoid_pred))
+    if method_pref in {'auto', 'isotonic'}:
+        isotonic_cal = _fit_isotonic_calibrator(raw_probs, y_true)
+        isotonic_pred = _apply_calibrator('isotonic', raw_probs, raw_logits, isotonic_cal)
+        candidates.append(('isotonic', isotonic_cal, isotonic_pred))
+
+    def _score(pred: np.ndarray) -> float:
+        clipped = np.clip(np.asarray(pred, dtype=float), 1e-6, 1 - 1e-6)
+        if metric == 'log_loss':
+            return float(log_loss(y_true.astype(int), clipped))
+        return float(brier_score_loss(y_true.astype(int), clipped))
+
+    best_method, best_calibrator, best_pred = candidates[0]
+    best_score = _score(best_pred)
+    for method_name, calibrator, pred in candidates[1:]:
+        score = _score(pred)
+        if score < best_score - 1e-12:
+            best_method, best_calibrator, best_pred, best_score = method_name, calibrator, pred, score
+    return best_method, best_calibrator, np.asarray(best_pred, dtype=float)
 
 
 def _select_best_c(

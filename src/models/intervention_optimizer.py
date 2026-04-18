@@ -115,6 +115,125 @@ def _solver_status(result: Any) -> str:
     return status_map.get(int(getattr(result, 'status', 4)), 'SolverError')
 
 
+def _enumerate_pareto_tanshi_three_stage(
+    sample_id: int,
+    actions: list[dict[str, Any]],
+    stage_actions: dict[int, list[int]],
+    pair_data: list[dict[str, Any]],
+    transition_tables: dict[str, dict[int, tuple[float, float]]],
+    scenarios: list[str],
+    cost_coeffs: np.ndarray,
+    burden_coeffs: np.ndarray,
+    pair_penalties: np.ndarray,
+    tolerance_limit: float,
+    max_total_burden: float,
+    max_budget: float,
+    latent_start: float,
+    tanshi_start: float,
+    objective_weights: dict[str, Any],
+    response_profile: dict[str, float],
+) -> dict | None:
+    """与三阶段 + pareto_tanshi 的 MILP 等价的全路径枚举（无辅助 y 变量），显著降低内存与时间。"""
+    stages_sorted = sorted(stage_actions.keys())
+    if stages_sorted != [0, 1, 2]:
+        return None
+    next_adj: dict[int, list[int]] = {}
+    for p in pair_data:
+        next_adj.setdefault(int(p['from_idx']), []).append(int(p['to_idx']))
+    edge_penalty: dict[tuple[int, int], float] = {
+        (int(p['from_idx']), int(p['to_idx'])): float(pair_penalties[pi]) for pi, p in enumerate(pair_data)
+    }
+    best_sel: tuple[int, int, int] | None = None
+    best_key: tuple[float, float, float] | None = None
+    s0 = stage_actions[0]
+    s1_set = set(stage_actions[1])
+    s2_set = set(stage_actions[2])
+    for i0 in s0:
+        for i1 in next_adj.get(i0, []):
+            if i1 not in s1_set:
+                continue
+            for i2 in next_adj.get(i1, []):
+                if i2 not in s2_set:
+                    continue
+                tc = float(cost_coeffs[i0] + cost_coeffs[i1] + cost_coeffs[i2])
+                tb = float(burden_coeffs[i0] + burden_coeffs[i1] + burden_coeffs[i2])
+                if tc > max_budget + 1e-9:
+                    continue
+                if float(burden_coeffs[i0]) > tolerance_limit + 1e-9:
+                    continue
+                if float(burden_coeffs[i1]) > tolerance_limit + 1e-9:
+                    continue
+                if float(burden_coeffs[i2]) > tolerance_limit + 1e-9:
+                    continue
+                if tb > max_total_burden + 1e-9:
+                    continue
+                scenario_ok = True
+                for s in scenarios:
+                    g_lat = float(
+                        transition_tables[s][i0][0]
+                        + transition_tables[s][i1][0]
+                        + transition_tables[s][i2][0]
+                    )
+                    g_tan = float(
+                        transition_tables[s][i0][1]
+                        + transition_tables[s][i1][1]
+                        + transition_tables[s][i2][1]
+                    )
+                    if g_lat > latent_start + 1e-9 or g_tan > tanshi_start + 1e-9:
+                        scenario_ok = False
+                        break
+                if not scenario_ok:
+                    continue
+                eta = max(
+                    float(tanshi_start - sum(transition_tables[s][i][1] for i in (i0, i1, i2))) for s in scenarios
+                )
+                key = (eta, tc, tb)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_sel = (i0, i1, i2)
+    if best_sel is None:
+        return {'sample_id': sample_id, 'status': 'infeasible', 'solver_status': 'Infeasible'}
+    i0, i1, i2 = best_sel
+    selected = [i0, i1, i2]
+    plan = [
+        (int(actions[idx]['tcm_level']), int(actions[idx]['intensity']), int(actions[idx]['frequency']))
+        for idx in selected
+    ]
+    nominal_key = 'nominal' if 'nominal' in transition_tables else scenarios[0]
+    nominal_latent_gain = sum(transition_tables[nominal_key][idx][0] for idx in selected)
+    nominal_tanshi_gain = sum(transition_tables[nominal_key][idx][1] for idx in selected)
+    total_cost = float(cost_coeffs[selected].sum())
+    total_burden = float(burden_coeffs[selected].sum())
+    smoothness = float(edge_penalty.get((i0, i1), 0.0) + edge_penalty.get((i1, i2), 0.0))
+    eta_star = float(best_key[0]) if best_key is not None else 0.0
+    nominal_objective = (
+        float(objective_weights['final_latent_state']) * max(0.0, latent_start - nominal_latent_gain)
+        + float(objective_weights['final_tanshi_score']) * max(0.0, tanshi_start - nominal_tanshi_gain)
+        + float(objective_weights['total_cost']) * total_cost / max(max_budget, 1.0)
+        + float(objective_weights['total_burden']) * total_burden / max_total_burden
+        + float(objective_weights['smoothness']) * smoothness / 10.0
+    )
+    return {
+        'sample_id': sample_id,
+        'status': 'ok',
+        'solver_status': 'Optimal',
+        'robust_type': 'scenario_minmax_three_stage_enum',
+        'budget_cap': max_budget,
+        'objective_mode': 'pareto_tanshi',
+        'final_latent_state': float(max(0.0, latent_start - nominal_latent_gain)),
+        'final_tanshi_score': float(max(0.0, tanshi_start - nominal_tanshi_gain)),
+        'total_cost': total_cost,
+        'total_burden': total_burden,
+        'worst_case_objective': eta_star,
+        'nominal_objective': float(nominal_objective),
+        'scenario_gap': float(eta_star - nominal_objective),
+        'profile_activity_to_tanshi': float(response_profile['activity_to_tanshi']),
+        'profile_activity_to_latent': float(response_profile['activity_to_latent']),
+        'profile_tanshi_to_latent': float(response_profile['tanshi_to_latent']),
+        'plan': plan,
+    }
+
+
 def optimize_patient_plan(
     row: pd.Series,
     clinical_rules: dict,
@@ -148,6 +267,30 @@ def optimize_patient_plan(
     burden_coeffs = np.asarray([float(action['burden']) for action in actions], dtype=float)
     pair_penalties = np.asarray([float(pair['penalty']) for pair in pair_data], dtype=float)
     max_total_burden = max(tolerance_limit * max(len(stage_actions), 1), 1.0)
+
+    latent_start = float(row['latent_state_h'])
+    tanshi_start = float(row['constitution_tanshi'])
+    if optimize_for == 'pareto_tanshi' and len(intervention_config.get('stages', [])) == 3:
+        enum_out = _enumerate_pareto_tanshi_three_stage(
+            int(row['sample_id']),
+            actions,
+            stage_actions,
+            pair_data,
+            transition_tables,
+            scenarios,
+            cost_coeffs,
+            burden_coeffs,
+            pair_penalties,
+            tolerance_limit,
+            max_total_burden,
+            max_budget,
+            latent_start,
+            tanshi_start,
+            objective_weights,
+            response_profile,
+        )
+        if enum_out is not None:
+            return enum_out
 
     constraints: list[LinearConstraint] = []
 
@@ -192,8 +335,6 @@ def optimize_patient_plan(
         row3[y_idx] = -1.0
         constraints.append(LinearConstraint(row3, -np.inf, 1.0))
 
-    latent_start = float(row['latent_state_h'])
-    tanshi_start = float(row['constitution_tanshi'])
     for scenario_name in scenarios:
         latent_gains = np.asarray([transition_tables[scenario_name][idx][0] for idx in range(n_actions)], dtype=float)
         tanshi_gains = np.asarray([transition_tables[scenario_name][idx][1] for idx in range(n_actions)], dtype=float)
@@ -234,12 +375,22 @@ def optimize_patient_plan(
     integrality = np.ones(n_vars, dtype=int)
     integrality[eta_idx] = 0
 
-    result = milp(
-        c=c,
-        constraints=constraints,
-        integrality=integrality,
-        bounds=Bounds(lower_bounds, upper_bounds),
-    )
+    milp_opts = intervention_config.get('milp_options') or {}
+    if isinstance(milp_opts, dict) and milp_opts:
+        result = milp(
+            c=c,
+            constraints=constraints,
+            integrality=integrality,
+            bounds=Bounds(lower_bounds, upper_bounds),
+            options=milp_opts,
+        )
+    else:
+        result = milp(
+            c=c,
+            constraints=constraints,
+            integrality=integrality,
+            bounds=Bounds(lower_bounds, upper_bounds),
+        )
     solver_status = _solver_status(result)
     if not bool(getattr(result, 'success', False)) or getattr(result, 'x', None) is None:
         return {'sample_id': int(row['sample_id']), 'status': 'infeasible', 'solver_status': solver_status}
@@ -309,8 +460,9 @@ def optimize_population(
     n_jobs: int | None = None,
     budget_override: float | None = None,
     optimize_for: str = 'weighted',
+    calibration: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    calibration = fit_transition_calibration(df, intervention_config)
+    calibration = calibration if calibration is not None else fit_transition_calibration(df, intervention_config)
     nj = int(effective_n_jobs(-1 if n_jobs is None else int(n_jobs)))
     row_dicts = [row.to_dict() for _, row in df.iterrows()]
     if nj == 1 or len(row_dicts) <= 1:

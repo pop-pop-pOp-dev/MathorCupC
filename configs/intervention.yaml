@@ -11,6 +11,9 @@ frequency_candidates: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 budget_levels: [500, 800, 1200, 1500, 2000]
 pareto_primary_budget: 2000
 max_intensity_jump: 1
+# SciPy HiGHS：单患者 MILP 时间上限（秒），避免极少数实例长时间阻塞全流程
+milp_options:
+  time_limit: 30.0
 metabolic_gain_multiplier:
   bmi_per_unit: 0.02
 scenarios:
